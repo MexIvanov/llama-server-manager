@@ -4,8 +4,13 @@ import subprocess
 import signal
 import threading
 import time
+
+
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
+from pathlib import Path
+
+user_home_path = Path.home()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -14,7 +19,12 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # Global variables
 server_process = None
 CONFIG_FILE = 'config.json'
-SERVER_PORT = 10000
+LLAMA_SERVER_HOST = "0.0.0.0"
+LLAMA_SERVER_PORT = 10000
+LLAMA_SERVER_PATH = f'{user_home_path}/llama.cpp/build/bin/llama-server'
+
+print(f"LLAMA_SERVER_PATH = {LLAMA_SERVER_PATH}")
+
 
 def load_config():
     """Load configuration from JSON file"""
@@ -132,10 +142,10 @@ def load_model():
     
     # Build the command
     cmd = [
-        '/home/mexivanov/llama.cpp/build/bin/llama-server',
-        '--host', "127.0.0.1",
+        LLAMA_SERVER_PATH,
+        '--host', LLAMA_SERVER_HOST,
         '--model', model_path,
-        '--port', str(SERVER_PORT),
+        '--port', str(LLAMA_SERVER_PORT),
         '-ngl', str(n_gpu_layers),
         '--ctx-size', str(n_ctx),
         '--predict', str(n_predict), 
