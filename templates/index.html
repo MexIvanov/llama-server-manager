@@ -12,7 +12,7 @@
     <!--<link rel="stylesheet" href="{{ url_for('static', filename='css/all.min.css') }}">
     <script src="{{ url_for('static', filename='js/tailwindcss-3-4-17-17.js') }}"></script>
     <script src="{{ url_for('static', filename='js/socket.io.js') }}"></script>-->
-    
+
     <style>
         @keyframes spin {
             to { transform: rotate(360deg); }
@@ -113,6 +113,14 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Generate Tokens</label>
                                 <input type="number" id="editGenTokens" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                             </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">MMProj Path (Optional)</label>
+                                <input type="text" id="editMmproj" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="/path/to/mmproj.gguf">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Custom Flags (Optional)</label>
+                                <input type="text" id="editCustomFlags" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="--temperature 0.7 --top-p 0.9">
+                            </div>
                         </div>
                         <div class="flex space-x-2">
                             <button onclick="saveConfig()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition">
@@ -174,6 +182,14 @@
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Tokens</label>
                         <input type="number" id="newGenTokens" value="4096" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">MMProj Path (Optional)</label>
+                        <input type="text" id="newMmproj" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="/path/to/mmproj.gguf">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Custom Flags (Optional)</label>
+                        <input type="text" id="newCustomFlags" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="--temperature 0.7 --top-p 0.9">
                     </div>
                 </div>
             </div>
@@ -255,6 +271,8 @@
                 document.getElementById('editGpuLayers').value = model.n_gpu_layers;
                 document.getElementById('editCtx').value = model.n_ctx;
                 document.getElementById('editGenTokens').value = model.n_generate_tokens;
+                document.getElementById('editMmproj').value = model.mmproj_path || '';
+                document.getElementById('editCustomFlags').value = model.custom_flags || '';
                 
                 document.getElementById('loadBtn').disabled = false;
             }
@@ -280,7 +298,9 @@
                         path_to_gguf_file: model.path_to_gguf_file,
                         n_gpu_layers: model.n_gpu_layers,
                         n_ctx: model.n_ctx,
-                        n_generate_tokens: model.n_generate_tokens
+                        n_generate_tokens: model.n_generate_tokens,
+                        mmproj_path: model.mmproj_path || '',
+                        custom_flags: model.custom_flags || ''
                     })
                 });
 
@@ -317,7 +337,9 @@
                 path_to_gguf_file: document.getElementById('editPath').value,
                 n_gpu_layers: parseInt(document.getElementById('editGpuLayers').value),
                 n_ctx: parseInt(document.getElementById('editCtx').value),
-                n_generate_tokens: parseInt(document.getElementById('editGenTokens').value)
+                n_generate_tokens: parseInt(document.getElementById('editGenTokens').value),
+                mmproj_path: document.getElementById('editMmproj').value,
+                custom_flags: document.getElementById('editCustomFlags').value
             };
 
             try {
@@ -383,6 +405,8 @@
             document.getElementById('newGpuLayers').value = '-1';
             document.getElementById('newCtx').value = '8192';
             document.getElementById('newGenTokens').value = '4096';
+            document.getElementById('newMmproj').value = '';
+            document.getElementById('newCustomFlags').value = '';
         }
 
         async function addModel() {
@@ -391,7 +415,9 @@
                 path_to_gguf_file: document.getElementById('newPath').value,
                 n_gpu_layers: parseInt(document.getElementById('newGpuLayers').value),
                 n_ctx: parseInt(document.getElementById('newCtx').value),
-                n_generate_tokens: parseInt(document.getElementById('newGenTokens').value)
+                n_generate_tokens: parseInt(document.getElementById('newGenTokens').value),
+                mmproj_path: document.getElementById('newMmproj').value,
+                custom_flags: document.getElementById('newCustomFlags').value
             };
 
             // Validate

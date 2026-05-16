@@ -155,6 +155,22 @@ def load_model():
 	    #'--override-tensor', ".*ffn_.*_exps.*=CPU",
     ]
     
+    # Add mmproj if provided
+    mmproj_path = data.get('mmproj_path', '')
+    if mmproj_path and mmproj_path.strip():
+        cmd.extend(['--mmproj', mmproj_path])
+    
+    # Add custom flags if provided
+    custom_flags = data.get('custom_flags', '')
+    if custom_flags and custom_flags.strip():
+        # Split custom flags by spaces, respecting quoted strings
+        import shlex
+        try:
+            custom_flags_list = shlex.split(custom_flags)
+            cmd.extend(custom_flags_list)
+        except Exception as e:
+            return jsonify({'error': f'Invalid custom flags: {str(e)}'}), 400
+    
     try:
         # Start the server process
         server_process = subprocess.Popen(
@@ -216,7 +232,9 @@ if __name__ == '__main__':
                     "path_to_gguf_file": "/path/to/your/model.gguf",
                     "n_gpu_layers": -1,     #Auto calculate GPU layers by default
                     "n_ctx": 8192,
-                    "n_generate_tokens": 4096
+                    "n_generate_tokens": 4096,
+                    "mmproj_path": "",
+                    "custom_flags": ""
                 }
             ]
         }
