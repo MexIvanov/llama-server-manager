@@ -10,6 +10,9 @@
 - **GPU Configuration** — Customize GPU offloading layers, context size, generation tokens and custom flags per model
 - **Server Control** — Load and unload models with a single click, with live status indicator
 - **Persistent Config** — Model configurations are saved to `config.json`
+- **Copy config** — Hover over model profile in UI and select the `copy` icon
+- **Advanced settings** — Configure custom flags and llama-server paths per model in `Advanced settings` and globally in `Settings`
+
 
 ## Prerequisites
 
@@ -28,13 +31,6 @@ pip install flask flask-socketio
 
 ```
 <user_home_path>/llama.cpp/build/bin/llama-server
-```
-
-Update these variables in `app.py` to match your system.
-```
-LLAMA_SERVER_HOST
-LLAMA_SERVER_PORT
-LLAMA_SERVER_PATH
 ```
 
 ## Running
@@ -74,13 +70,28 @@ Models are stored in `config.json` with the following structure:
 {
   "models": [
     {
-      "model_name": "My Model",
-      "path_to_gguf_file": "/path/to/model.gguf",
+      "model_name": "Example Model",
+      "path_to_gguf_file": "/path/to/your/model.gguf",
       "n_gpu_layers": -1,
       "n_ctx": 8192,
-      "n_generate_tokens": 4096
+      "n_generate_tokens": 4096,
+      "mmproj_path": "",
+      "custom_flags": "",
+      "llama_server_path": ""
     }
-  ]
+  ],
+  "settings": {
+    "llama_server_path": "<user_home_path>/llama.cpp/build/bin/llama-server",
+    "llama_server_host": "0.0.0.0",
+    "llama_server_port": 5001,
+    "defaults": {
+      "n_gpu_layers": -1,
+      "n_ctx": 8192,
+      "n_generate_tokens": 4096,
+      "mmproj_path": "",
+      "custom_flags": ""
+    }
+  }
 }
 ```
 
