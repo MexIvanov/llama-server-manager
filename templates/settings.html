@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Llama-server Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Header with Nav -->
+        <header class="mb-8">
+            <nav class="flex items-center justify-between mb-6">
+                <a href="/" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                    <i class="fas fa-arrow-left mr-2"></i>Back to Dashboard
+                </a>
+                <h1 class="text-2xl font-bold text-gray-800">
+                    <i class="fas fa-cog text-indigo-600 mr-2"></i>Settings
+                </h1>
+                <div class="w-28"></div> <!-- spacer for centering -->
+            </nav>
+        </header>
+
+        <!-- Server Settings -->
+        <div class="glass-effect rounded-xl shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-server mr-2"></i>llama-server Configuration
+            </h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">llama-server Binary Path</label>
+                    <input type="text" id="serverPath" value="{{ settings.llama_server_path }}"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        placeholder="~/llama.cpp/build/bin/llama-server">
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+                        <input type="text" id="serverHost" value="{{ settings.llama_server_host }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            placeholder="0.0.0.0">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+                        <input type="number" id="serverPort" value="{{ settings.llama_server_port }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            placeholder="10000" min="1" max="65535">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Default Profile Template -->
+        <div class="glass-effect rounded-xl shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-2">
+                <i class="fas fa-copy mr-2"></i>Default Profile Template
+            </h2>
+            <p class="text-sm text-gray-500 mb-4">
+                These values are pre-filled when you add a new model profile.
+            </p>
+            <div class="space-y-4">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">GPU Layers</label>
+                        <input type="number" id="defaultGpuLayers" value="{{ settings.defaults.n_gpu_layers }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <p class="text-xs text-gray-400 mt-1">-1 = auto-calculate</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Context Size</label>
+                        <input type="number" id="defaultCtx" value="{{ settings.defaults.n_ctx }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <p class="text-xs text-gray-400 mt-1">0 = full context</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Generate Tokens</label>
+                        <input type="number" id="defaultGenTokens" value="{{ settings.defaults.n_generate_tokens }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <p class="text-xs text-gray-400 mt-1">-1 = full context</p>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Default MMProj Path (Optional)</label>
+                    <input type="text" id="defaultMmproj" value="{{ settings.defaults.mmproj_path or '' }}"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        placeholder="/path/to/mmproj.gguf">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Default Custom Flags (Optional)</label>
+                    <input type="text" id="defaultCustomFlags" value="{{ settings.defaults.custom_flags or '' }}"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                        placeholder="--temperature 0.7 --top-p 0.9">
+                </div>
+            </div>
+        </div>
+
+        <!-- Save Button -->
+        <div class="flex justify-end space-x-3">
+            <a href="/" class="px-6 py-2 text-gray-600 hover:text-gray-800 transition">Cancel</a>
+            <button onclick="saveSettings()" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 transition">
+                <i class="fas fa-save mr-2"></i>Save Settings
+            </button>
+        </div>
+
+        <!-- Status Message -->
+        <div id="statusMessage" class="hidden mt-4 p-3 rounded-lg"></div>
+    </div>
+
+    <script>
+        async function saveSettings() {
+            const settings = {
+                llama_server_path: document.getElementById('serverPath').value.trim(),
+                llama_server_host: document.getElementById('serverHost').value.trim(),
+                llama_server_port: parseInt(document.getElementById('serverPort').value),
+                defaults: {
+                    n_gpu_layers: parseInt(document.getElementById('defaultGpuLayers').value),
+                    n_ctx: parseInt(document.getElementById('defaultCtx').value),
+                    n_generate_tokens: parseInt(document.getElementById('defaultGenTokens').value),
+                    mmproj_path: document.getElementById('defaultMmproj').value.trim(),
+                    custom_flags: document.getElementById('defaultCustomFlags').value.trim()
+                }
+            };
+
+            // Validate required fields
+            if (!settings.llama_server_path) {
+                showStatus('Please provide the llama-server binary path', 'error');
+                return;
+            }
+            if (!settings.llama_server_host) {
+                showStatus('Please provide the server host', 'error');
+                return;
+            }
+            if (isNaN(settings.llama_server_port) || settings.llama_server_port < 1 || settings.llama_server_port > 65535) {
+                showStatus('Port must be between 1 and 65535', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    showStatus(data.message, 'success');
+                } else {
+                    showStatus(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Network error: ${error.message}`, 'error');
+            }
+        }
+
+        function showStatus(message, type) {
+            const el = document.getElementById('statusMessage');
+            el.classList.remove('hidden', 'bg-green-100', 'text-green-800', 'bg-red-100', 'text-red-800');
+            if (type === 'success') {
+                el.classList.add('bg-green-100', 'text-green-800');
+            } else {
+                el.classList.add('bg-red-100', 'text-red-800');
+            }
+            el.textContent = message;
+        }
+    </script>
+</body>
+</html>

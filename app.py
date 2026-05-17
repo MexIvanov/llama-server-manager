@@ -19,11 +19,31 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # Global variables
 server_process = None
 CONFIG_FILE = 'config.json'
-LLAMA_SERVER_HOST = "0.0.0.0"
-LLAMA_SERVER_PORT = 10000
-LLAMA_SERVER_PATH = f'{user_home_path}/llama.cpp/build/bin/llama-server'
 
-print(f"LLAMA_SERVER_PATH = {LLAMA_SERVER_PATH}")
+# Defaults — overridden by load_config settings
+DEFAULT_LLAMA_SERVER_HOST = "0.0.0.0"
+DEFAULT_LLAMA_SERVER_PORT = 10000
+DEFAULT_LLAMA_SERVER_PATH = f'{user_home_path}/llama.cpp/build/bin/llama-server'
+
+# Runtime values (set from config)
+LLAMA_SERVER_HOST = DEFAULT_LLAMA_SERVER_HOST
+LLAMA_SERVER_PORT = DEFAULT_LLAMA_SERVER_PORT
+LLAMA_SERVER_PATH = DEFAULT_LLAMA_SERVER_PATH
+
+def get_default_settings():
+    """Return default settings for first-run"""
+    return {
+        "llama_server_path": DEFAULT_LLAMA_SERVER_PATH,
+        "llama_server_host": DEFAULT_LLAMA_SERVER_HOST,
+        "llama_server_port": DEFAULT_LLAMA_SERVER_PORT,
+        "defaults": {
+            "n_gpu_layers": -1,
+            "n_ctx": 8192,
+            "n_generate_tokens": 4096,
+            "mmproj_path": "",
+            "custom_flags": ""
+        }
+    }
 
 
 def load_config():
@@ -31,7 +51,7 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
-    return {"models": []}
+    return {"models": [], "settings": get_default_settings()}
 
 def save_config(config):
     """Save configuration to JSON file"""
@@ -61,7 +81,13 @@ def read_process_output(process, socketio):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    settings = load_config().get('settings', get_default_settings())
+    return render_template('index.html', defaults=settings.get('defaults', get_default_settings()['defaults']))
+
+@app.route('/settings')
+def settings_page():
+    settings = load_config().get('settings', get_default_settings())
+    return render_template('settings.html', settings=settings)
 
 @app.route('/api/models', methods=['GET'])
 def get_models():
@@ -132,6 +158,8 @@ def load_model():
     n_gpu_layers = data.get('n_gpu_layers', 0)
     n_ctx = data.get('n_ctx', 0)
     n_predict = data.get('n_generate_tokens', -1)
+    # Use per-model llama-server path if set, otherwise global
+    server_path = data.get('llama_server_path', '').strip() or LLAMA_SERVER_PATH
     print(f"Manager: Loading model with parameters: n_gpu_layers {str(n_gpu_layers)}, n_ctx: {str(n_ctx)}, n_predict: {str(n_predict)}")
     
     if not model_path:
@@ -142,7 +170,7 @@ def load_model():
     
     # Build the command
     cmd = [
-        LLAMA_SERVER_PATH,
+        server_path,
         '--host', LLAMA_SERVER_HOST,
         '--model', model_path,
         '--port', str(LLAMA_SERVER_PORT),
@@ -218,9 +246,50 @@ def unload_model():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    global server_process
+    global server_process, LLAMA_SERVER_HOST, LLAMA_SERVER_PORT, LLAMA_SERVER_PATH
     is_running = server_process and server_process.poll() is None
-    return jsonify({'is_loaded': is_running})
+    config = load_config()
+    settings = config.get('settings', get_default_settings())
+    return jsonify({
+        'is_loaded': is_running,
+        'llama_server_path': settings.get('llama_server_path', LLAMA_SERVER_PATH),
+        'llama_server_host': settings.get('llama_server_host', LLAMA_SERVER_HOST),
+        'llama_server_port': settings.get('llama_server_port', LLAMA_SERVER_PORT)
+    })
+
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    config = load_config()
+    settings = config.get('settings', get_default_settings())
+    return jsonify(settings)
+
+@app.route('/api/settings', methods=['PUT'])
+def update_settings():
+    global LLAMA_SERVER_HOST, LLAMA_SERVER_PORT, LLAMA_SERVER_PATH
+    new_settings = request.json
+    
+    config = load_config()
+    
+    # Validate port
+    port = new_settings.get('llama_server_port', DEFAULT_LLAMA_SERVER_PORT)
+    try:
+        port = int(port)
+        if port < 1 or port > 65535:
+            return jsonify({'error': 'Port must be between 1 and 65535'}), 400
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid port number'}), 400
+    
+    # Merge settings
+    config['settings'] = new_settings
+    save_config(config)
+    
+    # Update runtime values
+    LLAMA_SERVER_PATH = new_settings.get('llama_server_path', LLAMA_SERVER_PATH)
+    LLAMA_SERVER_HOST = new_settings.get('llama_server_host', LLAMA_SERVER_HOST)
+    LLAMA_SERVER_PORT = port
+    
+    print(f"Settings updated: path={LLAMA_SERVER_PATH}, host={LLAMA_SERVER_HOST}, port={LLAMA_SERVER_PORT}")
+    return jsonify({'success': True, 'message': 'Settings saved successfully'})
 
 if __name__ == '__main__':
     # Create default config if it doesn't exist
@@ -236,8 +305,17 @@ if __name__ == '__main__':
                     "mmproj_path": "",
                     "custom_flags": ""
                 }
-            ]
+            ],
+            "settings": get_default_settings()
         }
         save_config(default_config)
+    
+    # Apply settings from config
+    config = load_config()
+    settings = config.get('settings', get_default_settings())
+    LLAMA_SERVER_PATH = settings.get('llama_server_path', LLAMA_SERVER_PATH)
+    LLAMA_SERVER_HOST = settings.get('llama_server_host', LLAMA_SERVER_HOST)
+    LLAMA_SERVER_PORT = settings.get('llama_server_port', LLAMA_SERVER_PORT)
+    print(f"Settings loaded: path={LLAMA_SERVER_PATH}, host={LLAMA_SERVER_HOST}, port={LLAMA_SERVER_PORT}")
     
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

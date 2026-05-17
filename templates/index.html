@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GGUF Model Manager</title>
+    <title>Llama-server Manager</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -33,12 +33,19 @@
 </head>
 <body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
     <div class="container mx-auto px-4 py-8 max-w-7xl">
-        <!-- Header -->
-        <header class="text-center mb-8">
-            <h1 class="text-4xl font-bold text-gray-800 mb-2">
-                <i class="fas fa-brain text-indigo-600 mr-3"></i>
-                GGUF Model Manager
+        <!-- Navigation -->
+        <nav class="flex items-center justify-between mb-6">
+            <h1 class="text-2xl font-bold text-gray-800">
+                <i class="fas fa-brain text-indigo-600 mr-2"></i>
+                Llama-server Manager
             </h1>
+            <a href="/settings" class="text-indigo-600 hover:text-indigo-800 transition flex items-center px-3 py-1 rounded-lg hover:bg-white">
+                <i class="fas fa-cog mr-1"></i>Settings
+            </a>
+        </nav>
+
+        <!-- Header -->
+        <header class="text-center mb-6">
             <p class="text-gray-600">Manage and load your GGUF models with llama.cpp server</p>
         </header>
 
@@ -92,7 +99,18 @@
                         <p>Select a model from the list to view/edit configuration</p>
                     </div>
                     <div id="configForm" class="hidden space-y-4">
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <!-- Tabs -->
+                        <div class="flex border-b border-gray-200">
+                            <button onclick="switchConfigTab('basic')" id="tabBasic" class="px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600 transition">
+                                <i class="fas fa-sliders-h mr-1"></i>Basic
+                            </button>
+                            <button onclick="switchConfigTab('advanced')" id="tabAdvanced" class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition">
+                                <i class="fas fa-wrench mr-1"></i>Advanced
+                            </button>
+                        </div>
+
+                        <!-- Basic Tab -->
+                        <div id="configTabBasic" class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
                                 <input type="text" id="editModelName" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
@@ -117,11 +135,21 @@
                                 <label class="block text-sm font-medium text-gray-700 mb-1">MMProj Path (Optional)</label>
                                 <input type="text" id="editMmproj" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="/path/to/mmproj.gguf">
                             </div>
+                        </div>
+
+                        <!-- Advanced Tab -->
+                        <div id="configTabAdvanced" class="hidden space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">llama-server Path <span class="text-xs text-gray-400">(leave empty to use global)</span></label>
+                                <input type="text" id="editLlamaServerPath" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Uses global settings default">
+                            </div>
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Custom Flags (Optional)</label>
                                 <input type="text" id="editCustomFlags" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="--temperature 0.7 --top-p 0.9">
+                                <p class="text-xs text-gray-400 mt-1">Additional flags passed to llama-server at startup</p>
                             </div>
                         </div>
+
                         <div class="flex space-x-2">
                             <button onclick="saveConfig()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition">
                                 <i class="fas fa-save mr-2"></i>Save Changes
@@ -173,23 +201,27 @@
                 <div class="grid grid-cols-3 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">GPU Layers</label>
-                        <input type="number" id="newGpuLayers" value="-1" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <input type="number" id="newGpuLayers" value="{{ defaults.n_gpu_layers }}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Context</label>
-                        <input type="number" id="newCtx" value="8192" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <input type="number" id="newCtx" value="{{ defaults.n_ctx }}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Tokens</label>
-                        <input type="number" id="newGenTokens" value="4096" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                        <input type="number" id="newGenTokens" value="{{ defaults.n_generate_tokens }}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">MMProj Path (Optional)</label>
-                        <input type="text" id="newMmproj" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="/path/to/mmproj.gguf">
+                        <input type="text" id="newMmproj" value="{{ defaults.mmproj_path or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="/path/to/mmproj.gguf">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Custom Flags (Optional)</label>
-                        <input type="text" id="newCustomFlags" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="--temperature 0.7 --top-p 0.9">
+                        <input type="text" id="newCustomFlags" value="{{ defaults.custom_flags or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="--temperature 0.7 --top-p 0.9">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">llama-server Path <span class="text-xs text-gray-400">(optional)</span></label>
+                        <input type="text" id="newLlamaServerPath" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Uses global settings default">
                     </div>
                 </div>
             </div>
@@ -251,9 +283,16 @@
             }
 
             listContainer.innerHTML = models.map(model => `
-                <div onclick="selectModel('${model.model_name}')" class="model-item p-3 rounded-lg border ${selectedModel === model.model_name ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'} cursor-pointer transition">
-                    <div class="font-medium">${model.model_name}</div>
-                    <div class="text-sm text-gray-500">${model.path_to_gguf_file.split('/').pop()}</div>
+                <div class="group p-3 rounded-lg border ${selectedModel === model.model_name ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'} transition">
+                    <div class="flex items-start justify-between">
+                        <div onclick="selectModel('${model.model_name}')" class="cursor-pointer flex-1">
+                            <div class="font-medium">${model.model_name}${model.llama_server_path ? ' <i class="fas fa-plug text-amber-500 text-xs" title="Custom llama-server path"></i>' : ''}</div>
+                            <div class="text-sm text-gray-500">${model.path_to_gguf_file.split('/').pop()}</div>
+                        </div>
+                        <button onclick="event.stopPropagation(); duplicateModel('${model.model_name}')" class="ml-2 p-1 text-gray-400 hover:text-indigo-600 transition opacity-0 group-hover:opacity-100" title="Duplicate model">
+                            <i class="fas fa-copy"></i>
+                        </button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -273,6 +312,7 @@
                 document.getElementById('editGenTokens').value = model.n_generate_tokens;
                 document.getElementById('editMmproj').value = model.mmproj_path || '';
                 document.getElementById('editCustomFlags').value = model.custom_flags || '';
+                document.getElementById('editLlamaServerPath').value = model.llama_server_path || '';
                 
                 document.getElementById('loadBtn').disabled = false;
             }
@@ -300,7 +340,8 @@
                         n_ctx: model.n_ctx,
                         n_generate_tokens: model.n_generate_tokens,
                         mmproj_path: model.mmproj_path || '',
-                        custom_flags: model.custom_flags || ''
+                        custom_flags: model.custom_flags || '',
+                        llama_server_path: model.llama_server_path || ''
                     })
                 });
 
@@ -313,6 +354,17 @@
                 document.getElementById('loadingIndicator').classList.add('hidden');
                 addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
             }
+        }
+
+        function switchConfigTab(tab) {
+            document.getElementById('configTabBasic').classList.toggle('hidden', tab !== 'basic');
+            document.getElementById('configTabAdvanced').classList.toggle('hidden', tab !== 'advanced');
+            document.getElementById('tabBasic').className = tab === 'basic'
+                ? 'px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600 transition'
+                : 'px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition';
+            document.getElementById('tabAdvanced').className = tab === 'advanced'
+                ? 'px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-600 transition'
+                : 'px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition';
         }
 
         async function unloadModel() {
@@ -339,7 +391,8 @@
                 n_ctx: parseInt(document.getElementById('editCtx').value),
                 n_generate_tokens: parseInt(document.getElementById('editGenTokens').value),
                 mmproj_path: document.getElementById('editMmproj').value,
-                custom_flags: document.getElementById('editCustomFlags').value
+                custom_flags: document.getElementById('editCustomFlags').value,
+                llama_server_path: document.getElementById('editLlamaServerPath').value
             };
 
             try {
@@ -393,20 +446,46 @@
             }
         }
 
-        function openAddModelModal() {
+        function openAddModelModal(sourceModel) {
             document.getElementById('addModelModal').classList.remove('hidden');
+            if (sourceModel) {
+                document.getElementById('newModelName').value = 'Copy of ' + sourceModel.model_name;
+                document.getElementById('newPath').value = sourceModel.path_to_gguf_file;
+                document.getElementById('newGpuLayers').value = sourceModel.n_gpu_layers;
+                document.getElementById('newCtx').value = sourceModel.n_ctx;
+                document.getElementById('newGenTokens').value = sourceModel.n_generate_tokens;
+                document.getElementById('newMmproj').value = sourceModel.mmproj_path || '';
+                document.getElementById('newCustomFlags').value = sourceModel.custom_flags || '';
+                document.getElementById('newLlamaServerPath').value = sourceModel.llama_server_path || '';
+            } else {
+                document.getElementById('newModelName').value = '';
+                document.getElementById('newPath').value = '';
+                document.getElementById('newGpuLayers').value = '{{ defaults.n_gpu_layers }}';
+                document.getElementById('newCtx').value = '{{ defaults.n_ctx }}';
+                document.getElementById('newGenTokens').value = '{{ defaults.n_generate_tokens }}';
+                document.getElementById('newMmproj').value = '{{ defaults.mmproj_path or "" }}';
+                document.getElementById('newCustomFlags').value = '{{ defaults.custom_flags or "" }}';
+                document.getElementById('newLlamaServerPath').value = '';
+            }
+        }
+
+        function duplicateModel(modelName) {
+            const model = models.find(m => m.model_name === modelName);
+            if (model) openAddModelModal(model);
         }
 
         function closeAddModelModal() {
             document.getElementById('addModelModal').classList.add('hidden');
-            // Clear form
+            // Clear form but keep defaults
             document.getElementById('newModelName').value = '';
             document.getElementById('newPath').value = '';
-            document.getElementById('newGpuLayers').value = '-1';
-            document.getElementById('newCtx').value = '8192';
-            document.getElementById('newGenTokens').value = '4096';
-            document.getElementById('newMmproj').value = '';
-            document.getElementById('newCustomFlags').value = '';
+            // Reset to defaults (set from server-side template)
+            document.getElementById('newGpuLayers').value = '{{ defaults.n_gpu_layers }}';
+            document.getElementById('newCtx').value = '{{ defaults.n_ctx }}';
+            document.getElementById('newGenTokens').value = '{{ defaults.n_generate_tokens }}';
+            document.getElementById('newMmproj').value = '{{ defaults.mmproj_path or "" }}';
+            document.getElementById('newCustomFlags').value = '{{ defaults.custom_flags or "" }}';
+            document.getElementById('newLlamaServerPath').value = '';
         }
 
         async function addModel() {
@@ -417,7 +496,8 @@
                 n_ctx: parseInt(document.getElementById('newCtx').value),
                 n_generate_tokens: parseInt(document.getElementById('newGenTokens').value),
                 mmproj_path: document.getElementById('newMmproj').value,
-                custom_flags: document.getElementById('newCustomFlags').value
+                custom_flags: document.getElementById('newCustomFlags').value,
+                llama_server_path: document.getElementById('newLlamaServerPath').value
             };
 
             // Validate
