@@ -18,12 +18,16 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global variables
 server_process = None
+rpc_worker_process = None
 CONFIG_FILE = 'config.json'
 
 # Defaults — overridden by load_config settings
 DEFAULT_LLAMA_SERVER_HOST = "0.0.0.0"
 DEFAULT_LLAMA_SERVER_PORT = 10000
 DEFAULT_LLAMA_SERVER_PATH = f'{user_home_path}/llama.cpp/build/bin/llama-server'
+DEFAULT_RPC_SERVER_PATH = f'{user_home_path}/llama.cpp/build/bin/rpc-server'
+DEFAULT_RPC_WORKER_HOST = "0.0.0.0"
+DEFAULT_RPC_WORKER_PORT = 50052
 
 # Runtime values (set from config)
 LLAMA_SERVER_HOST = DEFAULT_LLAMA_SERVER_HOST
@@ -36,6 +40,12 @@ def get_default_settings():
         "llama_server_path": DEFAULT_LLAMA_SERVER_PATH,
         "llama_server_host": DEFAULT_LLAMA_SERVER_HOST,
         "llama_server_port": DEFAULT_LLAMA_SERVER_PORT,
+        "rpc_server_path": DEFAULT_RPC_SERVER_PATH,
+        "rpc_worker": {
+            "host": DEFAULT_RPC_WORKER_HOST,
+            "port": DEFAULT_RPC_WORKER_PORT,
+            "cache_dir": ""
+        },
         "defaults": {
             "n_gpu_layers": -1,
             "n_ctx": 8192,
@@ -50,8 +60,12 @@ def load_config():
     """Load configuration from JSON file"""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {"models": [], "settings": get_default_settings()}
+            config = json.load(f)
+        # Coordinator RPC worker endpoints live at top level so a full-replace
+        # of `settings` (via the Settings page) can't wipe them.
+        config.setdefault("rpc_endpoints", [])
+        return config
+    return {"models": [], "settings": get_default_settings(), "rpc_endpoints": []}
 
 def save_config(config):
     """Save configuration to JSON file"""
@@ -78,6 +92,25 @@ def read_process_output(process, socketio):
                         socketio.emit('loading_complete', {'success': False, 'message': f'Error: {line}'})
     except Exception as e:
         socketio.emit('console_output', {'data': f'Error reading output: {str(e)}'})
+
+def read_rpc_worker_output(process, socketio):
+    """Read and emit rpc-server worker output in real-time"""
+    worker_started = False
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                line = line.strip()
+                socketio.emit('console_output', {'data': line})
+
+                # rpc-server prints these on a successful bind/listen
+                if not worker_started and ("Starting RPC server" in line or "Accepting" in line or "listening" in line.lower()):
+                    worker_started = True
+                    socketio.emit('rpc_worker_started', {'success': True, 'message': 'RPC worker is running'})
+    except Exception as e:
+        socketio.emit('console_output', {'data': f'Error reading RPC worker output: {str(e)}'})
+    finally:
+        # Stream ended -> process exited
+        socketio.emit('rpc_worker_stopped', {'message': 'RPC worker process ended'})
 
 @app.route('/')
 def index():
@@ -187,7 +220,15 @@ def load_model():
     mmproj_path = data.get('mmproj_path', '')
     if mmproj_path and mmproj_path.strip():
         cmd.extend(['--mmproj', mmproj_path])
-    
+
+    # Add RPC worker endpoints if provided (distributed inference).
+    # Accepts a list of "host:port" or a comma-separated string.
+    rpc_servers = data.get('rpc_servers', '')
+    if isinstance(rpc_servers, list):
+        rpc_servers = ','.join(s.strip() for s in rpc_servers if s and s.strip())
+    if rpc_servers and rpc_servers.strip():
+        cmd.extend(['--rpc', rpc_servers.strip()])
+
     # Add custom flags if provided
     custom_flags = data.get('custom_flags', '')
     if custom_flags and custom_flags.strip():
@@ -290,6 +331,145 @@ def update_settings():
     
     print(f"Settings updated: path={LLAMA_SERVER_PATH}, host={LLAMA_SERVER_HOST}, port={LLAMA_SERVER_PORT}")
     return jsonify({'success': True, 'message': 'Settings saved successfully'})
+
+@app.route('/rpc')
+def rpc_page():
+    config = load_config()
+    settings = config.get('settings', get_default_settings())
+    return render_template('rpc.html',
+                           settings=settings,
+                           rpc_endpoints=config.get('rpc_endpoints', []))
+
+@app.route('/api/rpc/start_worker', methods=['POST'])
+def start_rpc_worker():
+    global rpc_worker_process
+
+    if rpc_worker_process and rpc_worker_process.poll() is None:
+        return jsonify({'error': 'RPC worker is already running'}), 400
+
+    data = request.json or {}
+    settings = load_config().get('settings', get_default_settings())
+    rpc_worker_defaults = settings.get('rpc_worker', {})
+
+    server_path = (data.get('rpc_server_path', '') or '').strip() \
+        or settings.get('rpc_server_path', DEFAULT_RPC_SERVER_PATH)
+    host = (data.get('host', '') or '').strip() \
+        or rpc_worker_defaults.get('host', DEFAULT_RPC_WORKER_HOST)
+    port = data.get('port', rpc_worker_defaults.get('port', DEFAULT_RPC_WORKER_PORT))
+    cache_dir = (data.get('cache_dir', '') or '').strip() \
+        or rpc_worker_defaults.get('cache_dir', '')
+
+    try:
+        port = int(port)
+        if port < 1 or port > 65535:
+            return jsonify({'error': 'Port must be between 1 and 65535'}), 400
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid port number'}), 400
+
+    # Build the command: rpc-server -H <host> -p <port>
+    cmd = [server_path, '-H', host, '-p', str(port)]
+
+    # Add custom flags if provided
+    custom_flags = data.get('custom_flags', '')
+    custom_flags_list = []
+    if custom_flags and custom_flags.strip():
+        import shlex
+        try:
+            custom_flags_list = shlex.split(custom_flags)
+            cmd.extend(custom_flags_list)
+        except Exception as e:
+            return jsonify({'error': f'Invalid custom flags: {str(e)}'}), 400
+
+    # Custom cache directory for shared model weights: enable rpc-server's local
+    # file cache (-c) and point LLAMA_CACHE at the chosen directory (rpc-server
+    # stores received weights under <cache_dir>/rpc/).
+    worker_env = os.environ.copy()
+    if cache_dir:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception as e:
+            return jsonify({'error': f'Could not create cache directory: {str(e)}'}), 400
+        if '-c' not in custom_flags_list and '--cache' not in custom_flags_list:
+            cmd.append('-c')
+        worker_env['LLAMA_CACHE'] = cache_dir
+
+    print(f"Manager: Starting RPC worker on {host}:{port} ({server_path})"
+          + (f", cache_dir={cache_dir}" if cache_dir else ""))
+
+    try:
+        rpc_worker_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+            env=worker_env
+        )
+
+        output_thread = threading.Thread(
+            target=read_rpc_worker_output,
+            args=(rpc_worker_process, socketio)
+        )
+        output_thread.daemon = True
+        output_thread.start()
+
+        return jsonify({'success': True, 'message': f'Starting RPC worker on {host}:{port} ...'})
+    except Exception as e:
+        return jsonify({'error': f'Failed to start RPC worker: {str(e)}'}), 500
+
+@app.route('/api/rpc/stop_worker', methods=['POST'])
+def stop_rpc_worker():
+    global rpc_worker_process
+
+    if rpc_worker_process and rpc_worker_process.poll() is None:
+        try:
+            rpc_worker_process.terminate()
+            rpc_worker_process.wait(timeout=5)
+            rpc_worker_process = None
+            socketio.emit('rpc_worker_stopped', {'message': 'RPC worker stopped'})
+            return jsonify({'success': True, 'message': 'RPC worker stopped'})
+        except subprocess.TimeoutExpired:
+            rpc_worker_process.kill()
+            rpc_worker_process = None
+            socketio.emit('rpc_worker_stopped', {'message': 'RPC worker force killed'})
+            return jsonify({'success': True, 'message': 'RPC worker force killed'})
+        except Exception as e:
+            return jsonify({'error': f'Failed to stop RPC worker: {str(e)}'}), 500
+    else:
+        return jsonify({'error': 'No RPC worker is currently running'}), 400
+
+@app.route('/api/rpc/status', methods=['GET'])
+def rpc_status():
+    worker_running = rpc_worker_process and rpc_worker_process.poll() is None
+    server_running = server_process and server_process.poll() is None
+    return jsonify({
+        'rpc_worker_running': bool(worker_running),
+        'server_running': bool(server_running)
+    })
+
+@app.route('/api/rpc/endpoints', methods=['GET'])
+def get_rpc_endpoints():
+    config = load_config()
+    return jsonify({'rpc_endpoints': config.get('rpc_endpoints', [])})
+
+@app.route('/api/rpc/endpoints', methods=['POST'])
+def save_rpc_endpoints():
+    data = request.json or {}
+    endpoints = data.get('rpc_endpoints', [])
+    if not isinstance(endpoints, list):
+        return jsonify({'error': 'rpc_endpoints must be a list'}), 400
+
+    # Normalize: trim, drop blanks, dedupe while keeping order
+    cleaned = []
+    for ep in endpoints:
+        ep = str(ep).strip()
+        if ep and ep not in cleaned:
+            cleaned.append(ep)
+
+    config = load_config()
+    config['rpc_endpoints'] = cleaned
+    save_config(config)
+    return jsonify({'success': True, 'message': 'RPC endpoints saved', 'rpc_endpoints': cleaned})
 
 if __name__ == '__main__':
     # Create default config if it doesn't exist

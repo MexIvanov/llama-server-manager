@@ -41,6 +41,34 @@ python app.py
 
 The web UI will be available at `http://localhost:5000`.
 
+## Run as a service (systemd)
+
+To run the manager in the background as a **systemd user service** (no sudo, survives
+logout, restarts on failure, and starts at boot via lingering):
+
+```bash
+./install-service.sh --venv          # create a project-local .venv and install deps
+./install-service.sh --conda <env>   # use an existing conda environment
+./install-service.sh --system        # use the system python3
+./install-service.sh                 # no flag: choose interactively
+```
+
+Useful commands once installed:
+
+```bash
+systemctl --user status llama-server-manager
+journalctl --user -u llama-server-manager -f
+```
+
+To remove it:
+
+```bash
+./uninstall-service.sh           # stop and remove the service
+./uninstall-service.sh --purge   # also delete the project-local .venv
+```
+
+The service serves the web UI on `http://localhost:5000`.
+
 ## Usage
 
 1. Open the web UI in your browser

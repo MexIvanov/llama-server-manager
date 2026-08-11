@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPC Mode - Llama-server Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+            animation: spin 2s linear infinite;
+        }
+        .console-output {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #00ff00;
+        }
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-5xl">
+        <!-- Header with Nav -->
+        <header class="mb-8">
+            <nav class="flex items-center justify-between mb-2">
+                <a href="/" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                    <i class="fas fa-arrow-left mr-2"></i>Back to Dashboard
+                </a>
+                <h1 class="text-2xl font-bold text-gray-800">
+                    <i class="fas fa-network-wired text-indigo-600 mr-2"></i>RPC Mode
+                </h1>
+                <a href="/settings" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                    <i class="fas fa-cog mr-1"></i>Settings
+                </a>
+            </nav>
+            <p class="text-sm text-gray-500 text-center">
+                Distribute one large model across multiple machines via llama.cpp RPC.
+            </p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Card A: This machine as RPC worker -->
+            <div class="glass-effect rounded-xl shadow-lg p-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-1">
+                    <i class="fas fa-microchip mr-2"></i>This Machine as RPC Worker
+                </h2>
+                <p class="text-sm text-gray-500 mb-4">
+                    Run <code>rpc-server</code> here to expose this machine's GPU/CPU to a
+                    coordinator. Run this on each secondary machine.
+                </p>
+                <div id="workerStatus" class="flex items-center mb-4">
+                    <div class="w-3 h-3 bg-gray-400 rounded-full mr-3"></div>
+                    <span class="text-gray-600">Checking...</span>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">rpc-server Binary Path</label>
+                        <input type="text" id="rpcServerPath" value="{{ settings.rpc_server_path or '' }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            placeholder="~/llama.cpp/build/bin/rpc-server">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+                            <input type="text" id="workerHost" value="{{ settings.rpc_worker.host if settings.rpc_worker else '0.0.0.0' }}"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                placeholder="0.0.0.0">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+                            <input type="number" id="workerPort" value="{{ settings.rpc_worker.port if settings.rpc_worker else 50052 }}"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                                placeholder="50052" min="1" max="65535">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Cache Directory (Optional)</label>
+                        <input type="text" id="workerCacheDir" value="{{ settings.rpc_worker.cache_dir if settings.rpc_worker else '' }}"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            placeholder="/data/llama-rpc-cache">
+                        <p class="text-xs text-gray-400 mt-1">Caches received model weights here so they aren't re-sent each load (stored under &lt;dir&gt;/rpc/).</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Extra Flags (Optional)</label>
+                        <input type="text" id="workerFlags"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                            placeholder="--mem 8192">
+                    </div>
+                    <div class="flex space-x-2">
+                        <button id="startWorkerBtn" onclick="startWorker()" class="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50">
+                            <i class="fas fa-play mr-2"></i>Start Worker
+                        </button>
+                        <button id="stopWorkerBtn" onclick="stopWorker()" class="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 transition disabled:opacity-50" disabled>
+                            <i class="fas fa-stop mr-2"></i>Stop Worker
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card B: Serve a model (coordinator) -->
+            <div class="glass-effect rounded-xl shadow-lg p-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-1">
+                    <i class="fas fa-sitemap mr-2"></i>Serve a Model (Coordinator)
+                </h2>
+                <p class="text-sm text-gray-500 mb-4">
+                    Launch <code>llama-server</code> here and spread the model across the worker
+                    endpoints below plus this machine.
+                </p>
+                <div id="serverStatus" class="flex items-center mb-4">
+                    <div class="w-3 h-3 bg-gray-400 rounded-full mr-3"></div>
+                    <span class="text-gray-600">Checking...</span>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Model Profile</label>
+                        <select id="modelSelect" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="">Loading models...</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            RPC Worker Endpoints <span class="text-xs text-gray-400">(one host:port per line)</span>
+                        </label>
+                        <textarea id="endpointsBox" rows="4"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                            placeholder="192.168.1.10:50052&#10;192.168.1.11:50052">{{ rpc_endpoints | join('\n') }}</textarea>
+                        <button onclick="saveEndpoints()" class="mt-2 text-sm text-indigo-600 hover:text-indigo-800">
+                            <i class="fas fa-save mr-1"></i>Save Endpoints
+                        </button>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button id="serveBtn" onclick="serveModel()" class="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50">
+                            <i class="fas fa-play mr-2"></i>Serve Model
+                        </button>
+                        <button id="unloadBtn" onclick="unloadModel()" class="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 transition disabled:opacity-50" disabled>
+                            <i class="fas fa-stop mr-2"></i>Stop
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Console Output -->
+        <div class="glass-effect rounded-xl shadow-lg p-6 mt-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold text-gray-800">
+                    <i class="fas fa-terminal mr-2"></i>Console Output
+                </h2>
+                <button onclick="clearConsole()" class="text-gray-600 hover:text-gray-800">
+                    <i class="fas fa-eraser"></i>
+                </button>
+            </div>
+            <div id="loadingIndicator" class="hidden mb-4">
+                <div class="flex items-center text-indigo-600">
+                    <i class="fas fa-spinner animate-spin-slow mr-3"></i>
+                    <span>Working... Please wait</span>
+                </div>
+            </div>
+            <div id="consoleOutput" class="console-output rounded-lg p-4 h-64 overflow-y-auto text-sm">
+                <div class="text-gray-400">Console output will appear here...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let models = [];
+
+        // Socket.io event handlers
+        socket.on('console_output', function(data) {
+            addConsoleOutput(data.data);
+        });
+
+        socket.on('loading_complete', function(data) {
+            document.getElementById('loadingIndicator').classList.add('hidden');
+            if (data.success) {
+                addConsoleOutput(`✅ ${data.message}`, 'success');
+            } else {
+                addConsoleOutput(`❌ ${data.message}`, 'error');
+            }
+            refreshStatus();
+        });
+
+        socket.on('model_unloaded', function(data) {
+            addConsoleOutput(`✅ ${data.message}`, 'success');
+            refreshStatus();
+        });
+
+        socket.on('rpc_worker_started', function(data) {
+            addConsoleOutput(`✅ ${data.message}`, 'success');
+            refreshStatus();
+        });
+
+        socket.on('rpc_worker_stopped', function(data) {
+            addConsoleOutput(`ℹ️ ${data.message}`, 'info');
+            refreshStatus();
+        });
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            loadModels();
+            refreshStatus();
+            setInterval(refreshStatus, 5000);
+        });
+
+        async function loadModels() {
+            try {
+                const response = await fetch('/api/models');
+                const data = await response.json();
+                models = data.models || [];
+                const select = document.getElementById('modelSelect');
+                if (models.length === 0) {
+                    select.innerHTML = '<option value="">No models available</option>';
+                    return;
+                }
+                select.innerHTML = models.map(m =>
+                    `<option value="${m.model_name}">${m.model_name}</option>`
+                ).join('');
+            } catch (error) {
+                console.error('Error loading models:', error);
+            }
+        }
+
+        function getEndpoints() {
+            return document.getElementById('endpointsBox').value
+                .split('\n')
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+        }
+
+        async function startWorker() {
+            document.getElementById('loadingIndicator').classList.remove('hidden');
+            addConsoleOutput('Starting RPC worker...', 'info');
+            try {
+                const response = await fetch('/api/rpc/start_worker', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        rpc_server_path: document.getElementById('rpcServerPath').value.trim(),
+                        host: document.getElementById('workerHost').value.trim(),
+                        port: parseInt(document.getElementById('workerPort').value),
+                        cache_dir: document.getElementById('workerCacheDir').value.trim(),
+                        custom_flags: document.getElementById('workerFlags').value.trim()
+                    })
+                });
+                const data = await response.json();
+                document.getElementById('loadingIndicator').classList.add('hidden');
+                if (response.ok) {
+                    addConsoleOutput(`✅ ${data.message}`, 'success');
+                } else {
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+                refreshStatus();
+            } catch (error) {
+                document.getElementById('loadingIndicator').classList.add('hidden');
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function stopWorker() {
+            try {
+                const response = await fetch('/api/rpc/stop_worker', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) {
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+                refreshStatus();
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function saveEndpoints() {
+            try {
+                const response = await fetch('/api/rpc/endpoints', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rpc_endpoints: getEndpoints() })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    addConsoleOutput(`✅ ${data.message}`, 'success');
+                } else {
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function serveModel() {
+            const modelName = document.getElementById('modelSelect').value;
+            if (!modelName) {
+                addConsoleOutput('❌ Please select a model profile', 'error');
+                return;
+            }
+            const model = models.find(m => m.model_name === modelName);
+            if (!model) return;
+
+            const endpoints = getEndpoints();
+            if (endpoints.length === 0) {
+                addConsoleOutput('⚠️ No RPC worker endpoints set — serving locally only', 'info');
+            }
+
+            document.getElementById('loadingIndicator').classList.remove('hidden');
+            clearConsole();
+            addConsoleOutput('Starting distributed model serving...', 'info');
+
+            try {
+                const response = await fetch('/api/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path_to_gguf_file: model.path_to_gguf_file,
+                        n_gpu_layers: model.n_gpu_layers,
+                        n_ctx: model.n_ctx,
+                        n_generate_tokens: model.n_generate_tokens,
+                        mmproj_path: model.mmproj_path || '',
+                        custom_flags: model.custom_flags || '',
+                        llama_server_path: model.llama_server_path || '',
+                        rpc_servers: endpoints
+                    })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    document.getElementById('loadingIndicator').classList.add('hidden');
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                document.getElementById('loadingIndicator').classList.add('hidden');
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function unloadModel() {
+            try {
+                const response = await fetch('/api/unload', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) {
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        async function refreshStatus() {
+            try {
+                const response = await fetch('/api/rpc/status');
+                const data = await response.json();
+                updateWorkerStatus(data.rpc_worker_running);
+                updateServerStatus(data.server_running);
+            } catch (error) {
+                updateWorkerStatus(false);
+                updateServerStatus(false);
+            }
+        }
+
+        function updateWorkerStatus(running) {
+            const statusDiv = document.getElementById('workerStatus');
+            const startBtn = document.getElementById('startWorkerBtn');
+            const stopBtn = document.getElementById('stopWorkerBtn');
+            if (running) {
+                statusDiv.innerHTML = `
+                    <div class="w-3 h-3 bg-green-500 rounded-full mr-3 animate-pulse"></div>
+                    <span class="text-green-600 font-medium">RPC worker running</span>`;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                statusDiv.innerHTML = `
+                    <div class="w-3 h-3 bg-gray-400 rounded-full mr-3"></div>
+                    <span class="text-gray-600">RPC worker stopped</span>`;
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        function updateServerStatus(running) {
+            const statusDiv = document.getElementById('serverStatus');
+            const serveBtn = document.getElementById('serveBtn');
+            const unloadBtn = document.getElementById('unloadBtn');
+            if (running) {
+                statusDiv.innerHTML = `
+                    <div class="w-3 h-3 bg-green-500 rounded-full mr-3 animate-pulse"></div>
+                    <span class="text-green-600 font-medium">Server running</span>`;
+                serveBtn.disabled = true;
+                unloadBtn.disabled = false;
+            } else {
+                statusDiv.innerHTML = `
+                    <div class="w-3 h-3 bg-gray-400 rounded-full mr-3"></div>
+                    <span class="text-gray-600">Server stopped</span>`;
+                serveBtn.disabled = false;
+                unloadBtn.disabled = true;
+            }
+        }
+
+        function addConsoleOutput(message, type = 'normal') {
+            const consoleDiv = document.getElementById('consoleOutput');
+            const timestamp = new Date().toLocaleTimeString();
+            let colorClass = 'text-gray-300';
+            if (type === 'success') colorClass = 'text-green-400';
+            else if (type === 'error') colorClass = 'text-red-400';
+            else if (type === 'info') colorClass = 'text-blue-400';
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = colorClass;
+            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
+
+            const placeholder = consoleDiv.querySelector('.text-gray-400');
+            if (placeholder) placeholder.remove();
+
+            consoleDiv.appendChild(messageDiv);
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
+
+        function clearConsole() {
+            const consoleDiv = document.getElementById('consoleOutput');
+            consoleDiv.innerHTML = '<div class="text-gray-400">Console output will appear here...</div>';
+        }
+    </script>
+</body>
+</html>
