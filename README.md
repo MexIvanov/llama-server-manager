@@ -12,6 +12,7 @@
 - **Persistent Config** — Model configurations are saved to `config.json`
 - **Copy config** — Hover over model profile in UI and select the `copy` icon
 - **Advanced settings** — Configure custom flags and llama-server paths per model in `Advanced settings` and globally in `Settings`
+- **Custom Scripts** — Launch vLLM, SGLang or any other server from your own script or commands, optionally inside a conda env or venv (see below)
 
 
 ## Prerequisites
@@ -78,6 +79,18 @@ The service serves the web UI on `http://localhost:5000`.
 5. The console panel streams real-time output from the server
 6. Click **"Unload Model"** to stop the server
 
+### Custom Scripts
+
+The **Custom Scripts** tab (`/scripts`) runs any model server, not just `llama-server`. Each script profile has:
+
+- **Script path** (optional): available to your commands as `$SCRIPT`. The working directory defaults to its folder.
+- **Script contents** (optional): paste a single-file script and it's saved to the script path (made executable) when you save the profile. Leave it empty to use the file already on disk.
+- **Environment**: None, a conda env (name or prefix) or a venv folder. It's activated before your commands run, and conda is found even when the manager runs as a service without conda on its `PATH`.
+- **Run commands**: run with `bash`, e.g. `vllm serve Qwen/Qwen3-8B --port 8000` or `python "$SCRIPT" --port 8000`.
+- **Ready pattern** (optional): the status turns *Ready* when this text appears in the output (vLLM and SGLang print `Application startup complete`).
+
+Several scripts can run at once, independently of `llama-server`. **Stop** terminates the script's whole process group, so worker processes don't linger.
+
 ## API Endpoints
 
 | Method | Endpoint       | Description               |
@@ -89,6 +102,14 @@ The service serves the web UI on `http://localhost:5000`.
 | POST   | `/api/load`    | Load a model into server  |
 | POST   | `/api/unload`  | Unload the running model  |
 | GET    | `/api/status`  | Check if server is running |
+| GET    | `/api/scripts` | List custom script profiles (with script file contents) |
+| POST   | `/api/scripts` | Add a script profile      |
+| PUT    | `/api/scripts/<name>` | Update a script profile |
+| DELETE | `/api/scripts/<name>` | Remove a script profile (the file on disk is kept) |
+| POST   | `/api/scripts/<name>/start` | Start a script |
+| POST   | `/api/scripts/<name>/stop`  | Stop a script and its child processes |
+| GET    | `/api/scripts/<name>/log`   | Last 1000 output lines of a script |
+| GET    | `/api/scripts/status` | State of every started script |
 
 ## Configuration
 
@@ -119,9 +140,22 @@ Models are stored in `config.json` with the following structure:
       "mmproj_path": "",
       "custom_flags": ""
     }
-  }
+  },
+  "custom_scripts": [
+    {
+      "name": "vLLM Qwen3-8B",
+      "script_path": "",
+      "env_type": "conda",
+      "env": "vllm",
+      "commands": "vllm serve Qwen/Qwen3-8B --port 8000",
+      "workdir": "",
+      "ready_pattern": "Application startup complete"
+    }
+  ]
 }
 ```
+
+`env_type` is `none`, `conda` or `venv`. Script contents aren't stored in `config.json`; the file at `script_path` is the source of truth.
 
 - `n_gpu_layers`: Number of layers to offload to GPU (`-1` = let llama-server automatically calculate & decide - usually recommended) 
 - `n_ctx`: Context window size (`0` = full context, decided by model)

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom Scripts - Llama-server Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+            animation: spin 2s linear infinite;
+        }
+        .console-output {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #00ff00;
+        }
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+        }
+        /* "What runs" preview: lines the manager adds are dimmed, the user's commands are bright */
+        .run-preview {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #e5e7eb;
+        }
+        .run-preview .added { color: #6b7280; }
+        @media (prefers-reduced-motion: reduce) {
+            .animate-pulse { animation: none; }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-7xl">
+        <!-- Header with Nav -->
+        <header class="mb-8">
+            <nav class="flex items-center justify-between mb-2">
+                <a href="/" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                    <i class="fas fa-arrow-left mr-2"></i>Back to Dashboard
+                </a>
+                <h1 class="text-2xl font-bold text-gray-800">
+                    <i class="fas fa-file-code text-indigo-600 mr-2"></i>Custom Scripts
+                </h1>
+                <div class="flex items-center space-x-4">
+                    <a href="/rpc" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                        <i class="fas fa-network-wired mr-1"></i>RPC Mode
+                    </a>
+                    <a href="/settings" class="text-indigo-600 hover:text-indigo-800 transition flex items-center">
+                        <i class="fas fa-cog mr-1"></i>Settings
+                    </a>
+                </div>
+            </nav>
+            <p class="text-sm text-gray-500 text-center">
+                Run vLLM, SGLang or any other model server from your own script, optionally inside a conda env or venv.
+            </p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Left: script profiles -->
+            <div class="lg:col-span-1">
+                <div class="glass-effect rounded-xl shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold text-gray-800">
+                            <i class="fas fa-list mr-2"></i>Script Profiles
+                        </h2>
+                        <button onclick="openScriptModal()" class="bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700 transition" title="Add script profile">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                    </div>
+                    <div id="scriptList" class="space-y-2 max-h-[32rem] overflow-y-auto">
+                        <div class="text-gray-500 text-center py-4">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: selected profile + console -->
+            <div class="lg:col-span-2 space-y-6">
+                <div class="glass-effect rounded-xl shadow-lg p-6">
+                    <div id="detailEmpty" class="text-center py-8">
+                        <i class="fas fa-file-code text-4xl text-indigo-200 mb-3"></i>
+                        <p class="text-gray-600 mb-4">Select a script profile, or add one to launch your first server.</p>
+                        <button onclick="openScriptModal()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition">
+                            <i class="fas fa-plus mr-2"></i>Add Script Profile
+                        </button>
+                    </div>
+
+                    <div id="detailPanel" class="hidden">
+                        <div class="flex items-start justify-between mb-4">
+                            <div class="min-w-0">
+                                <h2 id="detailName" class="text-xl font-semibold text-gray-800 break-words"></h2>
+                                <div id="detailStatus" class="flex items-center mt-1 text-sm"></div>
+                            </div>
+                            <button onclick="editScript(selected)" class="ml-4 text-indigo-600 hover:text-indigo-800 transition flex-shrink-0">
+                                <i class="fas fa-pen mr-1"></i>Edit
+                            </button>
+                        </div>
+
+                        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm mb-5">
+                            <div>
+                                <dt class="text-gray-500">Script</dt>
+                                <dd id="detailScript" class="font-mono text-gray-800 break-all"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-gray-500">Working directory</dt>
+                                <dd id="detailWorkdir" class="font-mono text-gray-800 break-all"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-gray-500">Environment</dt>
+                                <dd id="detailEnv" class="text-gray-800 break-all"></dd>
+                            </div>
+                            <div>
+                                <dt class="text-gray-500">Ready when output contains</dt>
+                                <dd id="detailReady" class="text-gray-800 break-all"></dd>
+                            </div>
+                        </dl>
+
+                        <div class="text-sm font-medium text-gray-700 mb-1">What runs</div>
+                        <pre id="detailPreview" class="run-preview rounded-lg p-4 text-sm overflow-x-auto whitespace-pre-wrap break-all"></pre>
+                        <p class="text-xs text-gray-400 mt-1">Gray lines are added for you. The rest are your commands, run with bash.</p>
+
+                        <div class="flex space-x-2 mt-5">
+                            <button id="startBtn" onclick="startScript()" class="flex-1 bg-green-600 text-white py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50" disabled>
+                                <i class="fas fa-play mr-2"></i>Start
+                            </button>
+                            <button id="stopBtn" onclick="stopScript()" class="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 transition disabled:opacity-50" disabled>
+                                <i class="fas fa-stop mr-2"></i>Stop
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Console Output -->
+                <div class="glass-effect rounded-xl shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold text-gray-800 min-w-0 truncate">
+                            <i class="fas fa-terminal mr-2"></i>Console Output
+                            <span id="consoleName" class="text-sm font-normal text-gray-500"></span>
+                        </h2>
+                        <button onclick="clearConsole()" class="text-gray-600 hover:text-gray-800" title="Clear console">
+                            <i class="fas fa-eraser"></i>
+                        </button>
+                    </div>
+                    <div id="consoleOutput" class="console-output rounded-lg p-4 h-96 overflow-y-auto text-sm"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add / Edit Script Modal -->
+    <div id="scriptModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <h3 id="modalTitle" class="text-xl font-semibold mb-4">Add Script Profile</h3>
+            <div class="space-y-4">
+                <div>
+                    <label for="fName" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                    <input type="text" id="fName" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="vLLM Qwen3-8B">
+                </div>
+                <div>
+                    <label for="fScriptPath" class="block text-sm font-medium text-gray-700 mb-1">Script Path <span class="text-xs text-gray-400">(optional)</span></label>
+                    <input type="text" id="fScriptPath" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm" placeholder="/home/me/serve/qwen.py">
+                    <p class="text-xs text-gray-400 mt-1">Your commands can use it as <code>$SCRIPT</code>. The working directory defaults to its folder.</p>
+                </div>
+                <div>
+                    <label for="fContent" class="block text-sm font-medium text-gray-700 mb-1">Script Contents <span class="text-xs text-gray-400">(optional)</span></label>
+                    <textarea id="fContent" rows="8" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm" placeholder="Paste a single-file script here to save it to the script path."></textarea>
+                    <p id="contentNote" class="text-xs text-gray-400 mt-1">If filled, it's saved to the script path when you save, replacing the file there. Leave it empty to use the file as it is.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                        <label for="fEnvType" class="block text-sm font-medium text-gray-700 mb-1">Environment</label>
+                        <select id="fEnvType" onchange="updateEnvField()" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                            <option value="none">None</option>
+                            <option value="conda">Conda env</option>
+                            <option value="venv">venv</option>
+                        </select>
+                    </div>
+                    <div id="envField" class="sm:col-span-2 hidden">
+                        <label for="fEnv" id="envLabel" class="block text-sm font-medium text-gray-700 mb-1">Env name or path</label>
+                        <input type="text" id="fEnv" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm">
+                    </div>
+                </div>
+                <p id="envHelp" class="text-xs text-gray-400 -mt-2"></p>
+                <div>
+                    <label for="fCommands" class="block text-sm font-medium text-gray-700 mb-1">Run Commands</label>
+                    <textarea id="fCommands" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                        placeholder="python &quot;$SCRIPT&quot; --port 8000&#10;&#10;# or launch a server directly:&#10;vllm serve Qwen/Qwen3-8B --port 8000"></textarea>
+                    <p class="text-xs text-gray-400 mt-1">Run with bash after the environment is activated. You can also activate an environment here yourself.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label for="fWorkdir" class="block text-sm font-medium text-gray-700 mb-1">Working Directory <span class="text-xs text-gray-400">(optional)</span></label>
+                        <input type="text" id="fWorkdir" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-mono text-sm" placeholder="Script's folder, else home">
+                    </div>
+                    <div>
+                        <label for="fReady" class="block text-sm font-medium text-gray-700 mb-1">Ready Pattern <span class="text-xs text-gray-400">(optional)</span></label>
+                        <input type="text" id="fReady" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Application startup complete">
+                    </div>
+                </div>
+                <p class="text-xs text-gray-400 -mt-2">The status turns Ready when this text shows up in the output. vLLM and SGLang print "Application startup complete".</p>
+                <p id="modalError" class="hidden text-sm text-red-600"></p>
+            </div>
+            <div class="flex justify-end space-x-2 mt-6">
+                <button onclick="closeScriptModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800">Cancel</button>
+                <button id="modalSaveBtn" onclick="saveScript()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50">Add Script</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let profiles = [];
+        let statuses = {};          // name -> {state, exit_code}
+        let selected = localStorage.getItem('selectedScript');
+        let editingName = null;     // null while adding a new profile
+        let logLoading = false;
+
+        const STATE_UI = {
+            stopped:  { dot: 'bg-gray-400',                text: 'text-gray-600',  label: () => 'Stopped' },
+            starting: { dot: 'bg-amber-500 animate-pulse', text: 'text-amber-600', label: s => `Starting, waiting for "${s.ready_pattern}"` },
+            ready:    { dot: 'bg-green-500 animate-pulse', text: 'text-green-600', label: () => 'Ready' },
+            running:  { dot: 'bg-green-500 animate-pulse', text: 'text-green-600', label: () => 'Running' },
+            failed:   { dot: 'bg-red-500',                 text: 'text-red-600',   label: (s, st) => `Exited with code ${st.exit_code}` },
+        };
+
+        const ENV_HELP = {
+            none:  'Commands run in a plain bash shell.',
+            conda: "Activated through conda's shell hook first, so it also works when the manager runs as a service.",
+            venv:  'The folder that contains bin/activate.',
+        };
+
+        // Socket.io event handlers
+        socket.on('script_output', function(data) {
+            if (data.name === selected && !logLoading) addLogLine(data.data);
+        });
+
+        socket.on('script_status', function(data) {
+            if (data.name === selected) {
+                if (data.state === 'ready') addConsoleOutput(`✅ ${data.message}`, 'success');
+                else if (data.state === 'failed') addConsoleOutput(`❌ ${data.message}`, 'error');
+                else addConsoleOutput(`ℹ️ ${data.message}`, 'info');
+            }
+            refreshStatus();
+        });
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            loadScripts();
+            setInterval(refreshStatus, 5000);
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeScriptModal();
+        });
+
+        function esc(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function apiPath(name, action = '') {
+            return `/api/scripts/${encodeURIComponent(name)}${action ? '/' + action : ''}`;
+        }
+
+        function stateOf(name) {
+            return statuses[name] || { state: 'stopped', exit_code: null };
+        }
+
+        function dirname(path) {
+            return path.replace(/\/[^\/]*$/, '') || '/';
+        }
+
+        function envLabel(s) {
+            if (s.env_type === 'conda') return `conda: ${s.env}`;
+            if (s.env_type === 'venv') return `venv: ${s.env.replace(/\/+$/, '').split('/').slice(-2).join('/')}`;
+            return 'No environment';
+        }
+
+        async function loadScripts() {
+            try {
+                const [scriptsRes, statusRes] = await Promise.all([fetch('/api/scripts'), fetch('/api/scripts/status')]);
+                profiles = (await scriptsRes.json()).custom_scripts || [];
+                statuses = await statusRes.json();
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+                return;
+            }
+            if (!profiles.some(s => s.name === selected)) {
+                selected = profiles.length ? profiles[0].name : null;
+            }
+            renderList();
+            renderDetail();
+            loadLog();
+        }
+
+        async function refreshStatus() {
+            try {
+                const response = await fetch('/api/scripts/status');
+                statuses = await response.json();
+                renderList();
+                updateDetailStatus();
+            } catch (error) {
+                console.error('Error refreshing status:', error);
+            }
+        }
+
+        function renderList() {
+            const list = document.getElementById('scriptList');
+            if (profiles.length === 0) {
+                list.innerHTML = '<div class="text-gray-500 text-center py-4">No script profiles yet</div>';
+                return;
+            }
+            list.innerHTML = profiles.map((s, i) => {
+                const st = stateOf(s.name);
+                const ui = STATE_UI[st.state] || STATE_UI.stopped;
+                const isSelected = s.name === selected;
+                return `
+                <div onclick="selectScript(profiles[${i}].name)" class="group p-3 rounded-lg border cursor-pointer ${isSelected ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'} transition">
+                    <div class="flex items-start justify-between">
+                        <div class="flex items-start min-w-0 flex-1">
+                            <span class="w-2.5 h-2.5 rounded-full mt-1.5 mr-3 flex-shrink-0 ${ui.dot}" title="${esc(ui.label(s, st))}"></span>
+                            <div class="min-w-0">
+                                <div class="font-medium truncate">${esc(s.name)}</div>
+                                <div class="text-sm text-gray-500 truncate">${esc(envLabel(s))}</div>
+                            </div>
+                        </div>
+                        <div class="flex ml-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+                            <button onclick="event.stopPropagation(); editScript(profiles[${i}].name)" class="p-1 text-gray-400 hover:text-indigo-600" title="Edit">
+                                <i class="fas fa-pen"></i>
+                            </button>
+                            <button onclick="event.stopPropagation(); duplicateScript(profiles[${i}].name)" class="p-1 text-gray-400 hover:text-indigo-600" title="Duplicate">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                            <button onclick="event.stopPropagation(); deleteScript(profiles[${i}].name)" class="p-1 text-gray-400 hover:text-red-600" title="Delete">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function selectScript(name) {
+            if (name === selected) return;
+            selected = name;
+            localStorage.setItem('selectedScript', name);
+            renderList();
+            renderDetail();
+            loadLog();
+        }
+
+        function renderDetail() {
+            const s = profiles.find(x => x.name === selected);
+            document.getElementById('detailEmpty').classList.toggle('hidden', !!s);
+            document.getElementById('detailPanel').classList.toggle('hidden', !s);
+            document.getElementById('consoleName').textContent = s ? `(${s.name})` : '';
+            if (!s) return;
+
+            const workdir = s.workdir || (s.script_path ? dirname(s.script_path) : '~');
+            document.getElementById('detailName').textContent = s.name;
+            document.getElementById('detailScript').textContent = s.script_path || 'None';
+            document.getElementById('detailWorkdir').textContent = workdir;
+            document.getElementById('detailEnv').textContent =
+                s.env_type === 'conda' ? `Conda env ${s.env}` : s.env_type === 'venv' ? `venv at ${s.env}` : 'None';
+            document.getElementById('detailReady').textContent = s.ready_pattern ? `"${s.ready_pattern}"` : 'Not set, shows Running once started';
+
+            // Mirror of what the backend runs (conda's shell hook line is simplified)
+            const added = [`cd ${workdir}`];
+            if (s.script_path) added.push(`export SCRIPT=${s.script_path}`);
+            if (s.env_type === 'conda') added.push(`conda activate ${s.env}`);
+            if (s.env_type === 'venv') added.push(`source ${s.env.replace(/\/+$/, '')}/bin/activate`);
+            document.getElementById('detailPreview').innerHTML =
+                added.map(l => `<span class="added">${esc(l)}</span>`).join('\n') + '\n' + esc(s.commands);
+
+            updateDetailStatus();
+        }
+
+        function updateDetailStatus() {
+            const s = profiles.find(x => x.name === selected);
+            if (!s) return;
+            const st = stateOf(s.name);
+            const ui = STATE_UI[st.state] || STATE_UI.stopped;
+            document.getElementById('detailStatus').innerHTML = `
+                <span class="w-3 h-3 rounded-full mr-2 ${ui.dot}"></span>
+                <span class="${ui.text} font-medium">${esc(ui.label(s, st))}</span>`;
+            const active = ['starting', 'ready', 'running'].includes(st.state);
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            if (!startBtn.dataset.busy) startBtn.disabled = active;
+            if (!stopBtn.dataset.busy) stopBtn.disabled = !active;
+        }
+
+        async function loadLog() {
+            clearConsole();
+            if (!selected) return;
+            const name = selected;
+            logLoading = true;
+            try {
+                const response = await fetch(apiPath(name, 'log'));
+                const data = await response.json();
+                if (name === selected) data.lines.forEach(addLogLine);
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            } finally {
+                logLoading = false;
+            }
+        }
+
+        function setBusy(btn, busy, html) {
+            if (busy) {
+                btn.dataset.busy = '1';
+                btn.dataset.html = btn.innerHTML;
+                btn.innerHTML = html;
+                btn.disabled = true;
+            } else {
+                delete btn.dataset.busy;
+                btn.innerHTML = btn.dataset.html;
+            }
+        }
+
+        async function startScript() {
+            const name = selected;
+            const btn = document.getElementById('startBtn');
+            setBusy(btn, true, '<i class="fas fa-spinner animate-spin-slow mr-2"></i>Starting...');
+            clearConsole();
+            try {
+                const response = await fetch(apiPath(name, 'start'), { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+            setBusy(btn, false);
+            refreshStatus();
+        }
+
+        async function stopScript() {
+            const name = selected;
+            const btn = document.getElementById('stopBtn');
+            setBusy(btn, true, '<i class="fas fa-spinner animate-spin-slow mr-2"></i>Stopping...');
+            try {
+                const response = await fetch(apiPath(name, 'stop'), { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+            setBusy(btn, false);
+            refreshStatus();
+        }
+
+        async function deleteScript(name) {
+            if (!confirm(`Delete the "${name}" profile? The script file on disk is kept.`)) return;
+            try {
+                const response = await fetch(apiPath(name), { method: 'DELETE' });
+                const data = await response.json();
+                if (response.ok) {
+                    addConsoleOutput(`✅ ${data.message}`, 'success');
+                    await loadScripts();
+                } else {
+                    addConsoleOutput(`❌ Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
+            }
+        }
+
+        // ----- Add / edit modal -----
+
+        function openScriptModal(source = null, isEdit = false) {
+            editingName = isEdit ? source.name : null;
+            document.getElementById('modalTitle').textContent = isEdit ? 'Edit Script Profile' : 'Add Script Profile';
+            document.getElementById('modalSaveBtn').textContent = isEdit ? 'Save Changes' : 'Add Script';
+            document.getElementById('fName').value = source ? (isEdit ? source.name : 'Copy of ' + source.name) : '';
+            document.getElementById('fScriptPath').value = source?.script_path || '';
+            document.getElementById('fContent').value = source?.script_content || '';
+            document.getElementById('fEnvType').value = source?.env_type || 'none';
+            document.getElementById('fEnv').value = source?.env || '';
+            document.getElementById('fCommands').value = source?.commands || '';
+            document.getElementById('fWorkdir').value = source?.workdir || '';
+            document.getElementById('fReady').value = source?.ready_pattern || '';
+
+            const unreadable = source?.script_path && source.script_content == null;
+            document.getElementById('contentNote').textContent = unreadable
+                ? "There's no readable text file at the script path yet. Fill this in to create it, or leave it empty to keep things as they are."
+                : "If filled, it's saved to the script path when you save, replacing the file there. Leave it empty to use the file as it is.";
+
+            showModalError('');
+            updateEnvField();
+            document.getElementById('scriptModal').classList.remove('hidden');
+            document.getElementById('fName').focus();
+        }
+
+        function closeScriptModal() {
+            document.getElementById('scriptModal').classList.add('hidden');
+        }
+
+        function editScript(name) {
+            const s = profiles.find(x => x.name === name);
+            if (s) openScriptModal(s, true);
+        }
+
+        function duplicateScript(name) {
+            const s = profiles.find(x => x.name === name);
+            if (s) openScriptModal(s, false);
+        }
+
+        function updateEnvField() {
+            const type = document.getElementById('fEnvType').value;
+            const input = document.getElementById('fEnv');
+            document.getElementById('envField').classList.toggle('hidden', type === 'none');
+            document.getElementById('envLabel').textContent = type === 'venv' ? 'venv Folder' : 'Conda Env Name or Path';
+            input.placeholder = type === 'venv' ? '/home/me/venvs/sglang' : 'vllm';
+            document.getElementById('envHelp').textContent = ENV_HELP[type];
+        }
+
+        function showModalError(message) {
+            const el = document.getElementById('modalError');
+            el.textContent = message;
+            el.classList.toggle('hidden', !message);
+        }
+
+        async function saveScript() {
+            const body = {
+                name: document.getElementById('fName').value.trim(),
+                script_path: document.getElementById('fScriptPath').value.trim(),
+                script_content: document.getElementById('fContent').value,
+                env_type: document.getElementById('fEnvType').value,
+                env: document.getElementById('fEnv').value.trim(),
+                commands: document.getElementById('fCommands').value,
+                workdir: document.getElementById('fWorkdir').value.trim(),
+                ready_pattern: document.getElementById('fReady').value.trim(),
+            };
+            if (!body.name || !body.commands.trim()) {
+                showModalError('Add a name and the commands to run.');
+                return;
+            }
+
+            const btn = document.getElementById('modalSaveBtn');
+            btn.disabled = true;
+            try {
+                const response = await fetch(editingName === null ? '/api/scripts' : apiPath(editingName), {
+                    method: editingName === null ? 'POST' : 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    closeScriptModal();
+                    selected = data.name;
+                    localStorage.setItem('selectedScript', selected);
+                    await loadScripts();
+                    addConsoleOutput(`✅ ${data.message}`, 'success');
+                } else {
+                    showModalError(data.error);
+                }
+            } catch (error) {
+                showModalError(`Network error: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // ----- Console -----
+
+        function trimAndScroll(consoleDiv, stick) {
+            while (consoleDiv.childElementCount > 1000) consoleDiv.firstElementChild.remove();
+            if (stick) consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
+
+        function nearBottom(consoleDiv) {
+            return consoleDiv.scrollHeight - consoleDiv.scrollTop - consoleDiv.clientHeight < 40;
+        }
+
+        function removePlaceholder(consoleDiv) {
+            const placeholder = consoleDiv.querySelector('.console-placeholder');
+            if (placeholder) placeholder.remove();
+        }
+
+        // A line of the script's own output (servers print their own timestamps)
+        function addLogLine(text) {
+            const consoleDiv = document.getElementById('consoleOutput');
+            const stick = nearBottom(consoleDiv);
+            removePlaceholder(consoleDiv);
+            const line = document.createElement('div');
+            line.className = 'text-gray-300 whitespace-pre-wrap break-all';
+            line.append(text);  // as text, so output like <|im_start|> isn't parsed as HTML
+            consoleDiv.appendChild(line);
+            trimAndScroll(consoleDiv, stick);
+        }
+
+        // A message from the manager itself
+        function addConsoleOutput(message, type = 'normal') {
+            const consoleDiv = document.getElementById('consoleOutput');
+            const timestamp = new Date().toLocaleTimeString();
+            let colorClass = 'text-gray-300';
+            if (type === 'success') colorClass = 'text-green-400';
+            else if (type === 'error') colorClass = 'text-red-400';
+            else if (type === 'info') colorClass = 'text-blue-400';
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = colorClass;
+            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> `;
+            messageDiv.append(message);
+
+            removePlaceholder(consoleDiv);
+            consoleDiv.appendChild(messageDiv);
+            trimAndScroll(consoleDiv, true);
+        }
+
+        function clearConsole() {
+            document.getElementById('consoleOutput').innerHTML =
+                '<div class="console-placeholder text-gray-400">Output from the selected script will appear here...</div>';
+        }
+    </script>
+</body>
+</html>
