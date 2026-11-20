@@ -136,9 +136,9 @@
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Default Custom Flags (Optional)</label>
-                    <input type="text" id="defaultCustomFlags" value="{{ settings.defaults.custom_flags or '' }}"
+                    <textarea id="defaultCustomFlags" rows="3"
                         class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                        placeholder="--temperature 0.7 --top-p 0.9">
+                        placeholder="--temperature 0.7 --top-p 0.9">{{ settings.defaults.custom_flags or '' }}</textarea>
                 </div>
             </div>
         </div>
