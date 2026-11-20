@@ -220,9 +220,8 @@
                     select.innerHTML = '<option value="">No models available</option>';
                     return;
                 }
-                select.innerHTML = models.map(m =>
-                    `<option value="${m.model_name}">${m.model_name}</option>`
-                ).join('');
+                select.innerHTML = '';
+                models.forEach(m => select.add(new Option(m.model_name, m.model_name)));
             } catch (error) {
                 console.error('Error loading models:', error);
             }
@@ -411,7 +410,8 @@
 
             const messageDiv = document.createElement('div');
             messageDiv.className = colorClass;
-            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
+            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> `;
+            messageDiv.append(message);  // as text, so output like <|im_start|> isn't parsed as HTML
 
             const placeholder = consoleDiv.querySelector('.text-gray-400');
             if (placeholder) placeholder.remove();

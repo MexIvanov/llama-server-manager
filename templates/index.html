@@ -239,6 +239,7 @@
 
     <script>
         const socket = io();
+        const DEFAULTS = {{ defaults | tojson }};
         let selectedModel = null;
         let models = [];
 
@@ -287,14 +288,14 @@
                 return;
             }
 
-            listContainer.innerHTML = models.map(model => `
+            listContainer.innerHTML = models.map((model, i) => `
                 <div class="group p-3 rounded-lg border ${selectedModel === model.model_name ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'} transition">
                     <div class="flex items-start justify-between">
-                        <div onclick="selectModel('${model.model_name}')" class="cursor-pointer flex-1">
+                        <div onclick="selectModel(models[${i}].model_name)" class="cursor-pointer flex-1">
                             <div class="font-medium">${model.model_name}${model.llama_server_path ? ' <i class="fas fa-plug text-amber-500 text-xs" title="Custom llama-server path"></i>' : ''}</div>
                             <div class="text-sm text-gray-500">${model.path_to_gguf_file.split('/').pop()}</div>
                         </div>
-                        <button onclick="event.stopPropagation(); duplicateModel('${model.model_name}')" class="ml-2 p-1 text-gray-400 hover:text-indigo-600 transition opacity-0 group-hover:opacity-100" title="Duplicate model">
+                        <button onclick="event.stopPropagation(); duplicateModel(models[${i}].model_name)" class="ml-2 p-1 text-gray-400 hover:text-indigo-600 transition opacity-0 group-hover:opacity-100" title="Duplicate model">
                             <i class="fas fa-copy"></i>
                         </button>
                     </div>
@@ -401,7 +402,7 @@
             };
 
             try {
-                const response = await fetch(`/api/models/${selectedModel}`, {
+                const response = await fetch(`/api/models/${encodeURIComponent(selectedModel)}`, {
                     method: 'PUT',
                     headers: {
                         'Content-Type': 'application/json',
@@ -431,7 +432,7 @@
             if (!confirm(`Are you sure you want to delete "${selectedModel}"?`)) return;
 
             try {
-                const response = await fetch(`/api/models/${selectedModel}`, {
+                const response = await fetch(`/api/models/${encodeURIComponent(selectedModel)}`, {
                     method: 'DELETE'
                 });
 
@@ -465,11 +466,11 @@
             } else {
                 document.getElementById('newModelName').value = '';
                 document.getElementById('newPath').value = '';
-                document.getElementById('newGpuLayers').value = '{{ defaults.n_gpu_layers }}';
-                document.getElementById('newCtx').value = '{{ defaults.n_ctx }}';
-                document.getElementById('newGenTokens').value = '{{ defaults.n_generate_tokens }}';
-                document.getElementById('newMmproj').value = '{{ defaults.mmproj_path or "" }}';
-                document.getElementById('newCustomFlags').value = '{{ defaults.custom_flags or "" }}';
+                document.getElementById('newGpuLayers').value = DEFAULTS.n_gpu_layers;
+                document.getElementById('newCtx').value = DEFAULTS.n_ctx;
+                document.getElementById('newGenTokens').value = DEFAULTS.n_generate_tokens;
+                document.getElementById('newMmproj').value = DEFAULTS.mmproj_path || '';
+                document.getElementById('newCustomFlags').value = DEFAULTS.custom_flags || '';
                 document.getElementById('newLlamaServerPath').value = '';
             }
         }
@@ -485,11 +486,11 @@
             document.getElementById('newModelName').value = '';
             document.getElementById('newPath').value = '';
             // Reset to defaults (set from server-side template)
-            document.getElementById('newGpuLayers').value = '{{ defaults.n_gpu_layers }}';
-            document.getElementById('newCtx').value = '{{ defaults.n_ctx }}';
-            document.getElementById('newGenTokens').value = '{{ defaults.n_generate_tokens }}';
-            document.getElementById('newMmproj').value = '{{ defaults.mmproj_path or "" }}';
-            document.getElementById('newCustomFlags').value = '{{ defaults.custom_flags or "" }}';
+            document.getElementById('newGpuLayers').value = DEFAULTS.n_gpu_layers;
+            document.getElementById('newCtx').value = DEFAULTS.n_ctx;
+            document.getElementById('newGenTokens').value = DEFAULTS.n_generate_tokens;
+            document.getElementById('newMmproj').value = DEFAULTS.mmproj_path || '';
+            document.getElementById('newCustomFlags').value = DEFAULTS.custom_flags || '';
             document.getElementById('newLlamaServerPath').value = '';
         }
 
@@ -537,13 +538,13 @@
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
-                updateServerStatus(data.is_loaded);
+                updateServerStatus(data.is_loaded, data.llama_server_port);
             } catch (error) {
                 updateServerStatus(false);
             }
         }
 
-        function updateServerStatus(isLoaded) {
+        function updateServerStatus(isLoaded, port) {
             const statusDiv = document.getElementById('serverStatus');
             const loadBtn = document.getElementById('loadBtn');
             const unloadBtn = document.getElementById('unloadBtn');
@@ -551,7 +552,7 @@
             if (isLoaded) {
                 statusDiv.innerHTML = `
                     <div class="w-3 h-3 bg-green-500 rounded-full mr-3 animate-pulse"></div>
-                    <span class="text-green-600 font-medium">Server Running (Port 10000)</span>
+                    <span class="text-green-600 font-medium">Server Running (Port ${port})</span>
                 `;
                 loadBtn.disabled = true;
                 unloadBtn.disabled = false;
@@ -577,8 +578,9 @@
 
             const messageDiv = document.createElement('div');
             messageDiv.className = colorClass;
-            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${message}`;
-            
+            messageDiv.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> `;
+            messageDiv.append(message);  // as text, so output like <|im_start|> isn't parsed as HTML
+
             // Remove placeholder if exists
             const placeholder = consoleDiv.querySelector('.text-gray-400');
             if (placeholder) placeholder.remove();

@@ -18,8 +18,9 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global variables
 server_process = None
+server_port = None  # port the running llama-server was launched with
 rpc_worker_process = None
-CONFIG_FILE = 'config.json'
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')  # next to app.py, regardless of CWD
 
 # Defaults — overridden by load_config settings
 DEFAULT_LLAMA_SERVER_HOST = "0.0.0.0"
@@ -85,13 +86,13 @@ def read_process_output(process, socketio):
                 if "main: server is listening on" in line:
                     server_started = True
                     socketio.emit('loading_complete', {'success': True, 'message': 'Model loaded successfully!'})
-                
-                # Check for error messages
-                if "error" in line.lower() or "failed" in line.lower():
-                    if not server_started:
-                        socketio.emit('loading_complete', {'success': False, 'message': f'Error: {line}'})
     except Exception as e:
         socketio.emit('console_output', {'data': f'Error reading output: {str(e)}'})
+
+    # Output ended -> process exited. If it never became ready, loading failed.
+    if not server_started:
+        process.wait()
+        socketio.emit('loading_complete', {'success': False, 'message': f'llama-server exited before it was ready (exit code {process.returncode})'})
 
 def read_rpc_worker_output(process, socketio):
     """Read and emit rpc-server worker output in real-time"""
@@ -151,11 +152,16 @@ def add_model():
     save_config(config)
     return jsonify({'success': True, 'message': 'Model added successfully'})
 
-@app.route('/api/models/<model_name>', methods=['PUT'])
+@app.route('/api/models/<path:model_name>', methods=['PUT'])
 def update_model(model_name):
     config = load_config()
     updated_model = request.json
-    
+
+    # Renaming must not collide with another existing model
+    new_name = updated_model.get('model_name', model_name)
+    if new_name != model_name and any(m['model_name'] == new_name for m in config['models']):
+        return jsonify({'error': 'Model with this name already exists'}), 400
+
     for i, model in enumerate(config['models']):
         if model['model_name'] == model_name:
             # Check if file exists for updated path
@@ -169,7 +175,7 @@ def update_model(model_name):
     
     return jsonify({'error': 'Model not found'}), 404
 
-@app.route('/api/models/<model_name>', methods=['DELETE'])
+@app.route('/api/models/<path:model_name>', methods=['DELETE'])
 def delete_model(model_name):
     config = load_config()
     config['models'] = [m for m in config['models'] if m['model_name'] != model_name]
@@ -178,8 +184,8 @@ def delete_model(model_name):
 
 @app.route('/api/load', methods=['POST'])
 def load_model():
-    global server_process
-    
+    global server_process, server_port
+
     # Check if server is already running
     if server_process and server_process.poll() is None:
         return jsonify({'error': 'Model is already loaded'}), 400
@@ -249,7 +255,8 @@ def load_model():
             universal_newlines=True,
             bufsize=1
         )
-        
+        server_port = LLAMA_SERVER_PORT
+
         # Start a thread to read output
         output_thread = threading.Thread(
             target=read_process_output,
@@ -295,7 +302,8 @@ def get_status():
         'is_loaded': is_running,
         'llama_server_path': settings.get('llama_server_path', LLAMA_SERVER_PATH),
         'llama_server_host': settings.get('llama_server_host', LLAMA_SERVER_HOST),
-        'llama_server_port': settings.get('llama_server_port', LLAMA_SERVER_PORT)
+        # While running, report the port llama-server was actually launched with
+        'llama_server_port': server_port if is_running else settings.get('llama_server_port', LLAMA_SERVER_PORT)
     })
 
 @app.route('/api/settings', methods=['GET'])
