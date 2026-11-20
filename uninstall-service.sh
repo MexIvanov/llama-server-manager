@@ -30,6 +30,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 systemctl --user disable --now "$SERVICE_NAME.service" 2>/dev/null || true
+# llama-server, the RPC worker and custom scripts run in their own scopes so they survive service
+# restarts; with the manager gone nothing would track them, so stop them too.
+systemctl --user stop "$SERVICE_NAME-*.scope" 2>/dev/null || true
 rm -f "$UNIT_FILE"
 systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user reset-failed "$SERVICE_NAME.service" 2>/dev/null || true

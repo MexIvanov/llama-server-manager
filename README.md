@@ -91,6 +91,14 @@ The **Custom Scripts** tab (`/scripts`) runs any model server, not just `llama-s
 
 Several scripts can run at once, independently of `llama-server`. **Stop** terminates the script's whole process group, so worker processes don't linger.
 
+### Restarts
+
+By default, stopping or killing the manager also stops the loaded model (`llama-server`), the RPC worker and custom scripts. That covers Ctrl+C, `systemctl --user stop`/`restart` and crashes, including `kill -9`. A small helper process (`app.py --reaper`) does the stopping, because the manager itself can't once it's been killed. Reloads after `app.py` changes never stop them.
+
+To keep them running across manager restarts and crashes instead, turn off **Settings → When the Manager Stops**. Each process runs in its own `systemd-run --user --scope` (`llama-server-manager-<id>.scope`) when one is available, so restarting the service doesn't kill it. On startup the manager re-adopts them, including any that finished loading or exited while it was down. Open pages reconnect and refresh by themselves. In this mode, stopping the service doesn't free the GPU: use **Unload** / **Stop** in the UI. `./uninstall-service.sh` stops everything in either mode.
+
+Output is kept in `script_runs/<id>.log` next to `app.py`, and run state in `script_runs/servers.json` and `script_runs/runs.json`.
+
 ## API Endpoints
 
 | Method | Endpoint       | Description               |
@@ -102,6 +110,8 @@ Several scripts can run at once, independently of `llama-server`. **Stop** termi
 | POST   | `/api/load`    | Load a model into server  |
 | POST   | `/api/unload`  | Unload the running model  |
 | GET    | `/api/status`  | Check if server is running |
+| GET    | `/api/log`     | Last 1000 output lines of `llama-server` (current or last run) |
+| GET    | `/api/rpc/log` | Last output lines of the RPC worker and `llama-server`, oldest run first |
 | GET    | `/api/scripts` | List custom script profiles (with script file contents) |
 | POST   | `/api/scripts` | Add a script profile      |
 | PUT    | `/api/scripts/<name>` | Update a script profile |

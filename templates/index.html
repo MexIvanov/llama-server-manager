@@ -248,7 +248,8 @@
 
         // Socket.io event handlers
         socket.on('console_output', function(data) {
-            addConsoleOutput(data.data);
+            if (pendingLines) pendingLines.push(data);  // history is loading: sort it out once it's here
+            else if (!inHistory(data)) addConsoleOutput(data.data);
         });
 
         socket.on('loading_complete', function(data) {
@@ -266,9 +267,27 @@
             checkServerStatus();
         });
 
+        // Reconnected after a manager restart (llama-server keeps running): catch up on output printed
+        // meanwhile, refresh the status, and stop the spinner unless the model is still loading
+        let connectedBefore = false;
+        socket.on('connect', async function() {
+            if (connectedBefore) {
+                loadConsoleHistory();
+                checkServerStatus();
+                try {
+                    const status = await (await fetch('/api/status')).json();
+                    if (!status.is_loaded || status.is_ready) {
+                        document.getElementById('loadingIndicator').classList.add('hidden');
+                    }
+                } catch (error) {}
+            }
+            connectedBefore = true;
+        });
+
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             loadModels();
+            loadConsoleHistory();
             checkServerStatus();
             setInterval(checkServerStatus, 5000);
         });
@@ -595,6 +614,46 @@
         function clearConsole() {
             const consoleDiv = document.getElementById('consoleOutput');
             consoleDiv.innerHTML = '<div class="text-gray-400">Console output will appear here...</div>';
+        }
+
+        // Replace the console with llama-server's recent output (current run, or the last one).
+        // Lines have no timestamp: they were printed before the page got them. Live lines carry
+        // their run and log offset, so the ones the history already covers are skipped.
+        let shown = { run: null, end: 0 };  // log range the console already shows
+        let pendingLines = null;            // live lines that arrive while history is loading
+        let historyRequest = 0;
+
+        function inHistory(line) {
+            return line.run != null && line.run === shown.run && line.pos != null && line.pos <= shown.end;
+        }
+
+        async function loadConsoleHistory() {
+            const request = ++historyRequest;
+            const queued = pendingLines = [];
+            try {
+                const data = await (await fetch('/api/log')).json();
+                if (request !== historyRequest) return;  // a newer load took over
+                shown = { run: data.run, end: data.end };
+                clearConsole();
+                if (data.lines.length) {
+                    const consoleDiv = document.getElementById('consoleOutput');
+                    const fragment = document.createDocumentFragment();
+                    data.lines.forEach(line => {
+                        const lineDiv = document.createElement('div');
+                        lineDiv.className = 'text-gray-300';
+                        lineDiv.textContent = line;  // as text, so output like <|im_start|> isn't parsed as HTML
+                        fragment.appendChild(lineDiv);
+                    });
+                    consoleDiv.replaceChildren(fragment);
+                    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                }
+                queued.forEach(line => { if (!inHistory(line)) addConsoleOutput(line.data); });
+            } catch (error) {
+                console.error('Error loading console history:', error);
+                if (request === historyRequest) queued.forEach(line => addConsoleOutput(line.data));
+            } finally {
+                if (pendingLines === queued) pendingLines = null;
+            }
         }
     </script>
 </body>

@@ -148,6 +148,25 @@
             </div>
         </div>
 
+        <!-- When the Manager Stops -->
+        <div class="glass-effect rounded-xl shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-power-off mr-2"></i>When the Manager Stops
+            </h2>
+            <label for="stopWithManager" class="flex items-start cursor-pointer">
+                <input type="checkbox" id="stopWithManager" {{ 'checked' if settings.get('stop_processes_with_manager', True) }}
+                    class="mt-1 mr-3 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-2 focus:ring-indigo-500">
+                <span>
+                    <span class="block text-sm font-medium text-gray-700">Stop the model, RPC worker and custom scripts too</span>
+                    <span class="block text-xs text-gray-400 mt-1">
+                        Applies when the manager is stopped or killed: Ctrl+C, systemctl stop or restart, a crash.
+                        Turn it off to keep them running; the manager picks them up again when it starts.
+                        Reloads after app.py changes never stop them.
+                    </span>
+                </span>
+            </label>
+        </div>
+
         <!-- Save Button -->
         <div class="flex justify-end space-x-3">
             <a href="/" class="px-6 py-2 text-gray-600 hover:text-gray-800 transition">Cancel</a>
@@ -178,7 +197,8 @@
                     n_generate_tokens: parseInt(document.getElementById('defaultGenTokens').value),
                     mmproj_path: document.getElementById('defaultMmproj').value.trim(),
                     custom_flags: document.getElementById('defaultCustomFlags').value.trim()
-                }
+                },
+                stop_processes_with_manager: document.getElementById('stopWithManager').checked
             };
 
             // Validate required fields

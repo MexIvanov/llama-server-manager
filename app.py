@@ -1,13 +1,16 @@
 import os
 import json
+import functools
+import re
 import shlex
 import shutil
 import stat
 import subprocess
 import signal
+import sys
 import threading
 import time
-from collections import deque
+import uuid
 
 
 from flask import Flask, render_template, request, jsonify
@@ -21,11 +24,11 @@ app.config['SECRET_KEY'] = 'your-secret-key-here'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global variables
-server_process = None
-server_port = None  # port the running llama-server was launched with
-rpc_worker_process = None
-script_runs = {}  # custom script name -> {'proc', 'ready', 'stopped', 'ready_pattern', 'log'}
+# Run records (see launch_run), persisted in RUNS_DIR so they survive a manager restart
+server_runs = {}  # 'llama-server' / 'rpc-worker' -> run record
+script_runs = {}  # custom script name -> run record
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')  # next to app.py, regardless of CWD
+RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'script_runs')  # process logs + run state
 
 # Defaults — overridden by load_config settings
 DEFAULT_LLAMA_SERVER_HOST = "0.0.0.0"
@@ -58,7 +61,10 @@ def get_default_settings():
             "n_generate_tokens": 4096,
             "mmproj_path": "",
             "custom_flags": ""
-        }
+        },
+        # Stop llama-server, the RPC worker and custom scripts when the manager stops or is killed
+        # (see reaper_main). Off: they keep running and are re-adopted on the next start.
+        "stop_processes_with_manager": True
     }
 
 
@@ -78,46 +84,6 @@ def save_config(config):
     """Save configuration to JSON file"""
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
-
-def read_process_output(process, socketio):
-    """Read and emit process output in real-time"""
-    server_started = False
-    try:
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                line = line.strip()
-                socketio.emit('console_output', {'data': line})
-                
-                # Check for server start message
-                if "main: server is listening on" in line:
-                    server_started = True
-                    socketio.emit('loading_complete', {'success': True, 'message': 'Model loaded successfully!'})
-    except Exception as e:
-        socketio.emit('console_output', {'data': f'Error reading output: {str(e)}'})
-
-    # Output ended -> process exited. If it never became ready, loading failed.
-    if not server_started:
-        process.wait()
-        socketio.emit('loading_complete', {'success': False, 'message': f'llama-server exited before it was ready (exit code {process.returncode})'})
-
-def read_rpc_worker_output(process, socketio):
-    """Read and emit rpc-server worker output in real-time"""
-    worker_started = False
-    try:
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                line = line.strip()
-                socketio.emit('console_output', {'data': line})
-
-                # rpc-server prints these on a successful bind/listen
-                if not worker_started and ("Starting RPC server" in line or "Accepting" in line or "listening" in line.lower()):
-                    worker_started = True
-                    socketio.emit('rpc_worker_started', {'success': True, 'message': 'RPC worker is running'})
-    except Exception as e:
-        socketio.emit('console_output', {'data': f'Error reading RPC worker output: {str(e)}'})
-    finally:
-        # Stream ended -> process exited
-        socketio.emit('rpc_worker_stopped', {'message': 'RPC worker process ended'})
 
 @app.route('/')
 def index():
@@ -190,10 +156,8 @@ def delete_model(model_name):
 
 @app.route('/api/load', methods=['POST'])
 def load_model():
-    global server_process, server_port
-
     # Check if server is already running
-    if server_process and server_process.poll() is None:
+    if server_running('llama-server'):
         return jsonify({'error': 'Model is already loaded'}), 400
     
     data = request.json
@@ -252,47 +216,30 @@ def load_model():
         except Exception as e:
             return jsonify({'error': f'Invalid custom flags: {str(e)}'}), 400
     
-    try:
-        # Start the server process
-        server_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
-        server_port = LLAMA_SERVER_PORT
+    # The binary runs under a bash wrapper (see launch_run), so a missing one wouldn't raise here
+    if not shutil.which(server_path):
+        return jsonify({'error': f'Failed to start server: llama-server not found at {server_path}'}), 500
 
-        # Start a thread to read output
-        output_thread = threading.Thread(
-            target=read_process_output,
-            args=(server_process, socketio)
-        )
-        output_thread.daemon = True
-        output_thread.start()
-	
+    try:
+        # Start the server process; it keeps running if the manager restarts
+        launch_run('llama-server', 'llama-server', cmd, description='llama-server', port=LLAMA_SERVER_PORT)
+
         #return jsonify({'success': True, 'message': 'Loading model...'})
         return jsonify({'success': True, 'message': f"Manager: Loading model with parameters: n_gpu_layers {str(n_gpu_layers)}, n_ctx: {str(n_ctx)}, n_predict: {str(n_predict)} ..."})
-        
+
     except Exception as e:
         return jsonify({'error': f'Failed to start server: {str(e)}'}), 500
 
 @app.route('/api/unload', methods=['POST'])
 def unload_model():
-    global server_process
-    
-    if server_process and server_process.poll() is None:
+    if server_running('llama-server'):
+        run = server_runs['llama-server']
+        run['stopped'] = True
+        save_runs()
         try:
-            server_process.terminate()
-            server_process.wait(timeout=5)
-            server_process = None
-            socketio.emit('model_unloaded', {'success': True, 'message': 'Model unloaded successfully'})
-            return jsonify({'success': True, 'message': 'Model unloaded successfully'})
-        except subprocess.TimeoutExpired:
-            server_process.kill()
-            server_process = None
-            socketio.emit('model_unloaded', {'success': True, 'message': 'Model force killed'})
-            return jsonify({'success': True, 'message': 'Model force killed'})
+            message = 'Model force killed' if stop_process_group(run, timeout=5) else 'Model unloaded successfully'
+            socketio.emit('model_unloaded', {'success': True, 'message': message})
+            return jsonify({'success': True, 'message': message})
         except Exception as e:
             return jsonify({'error': f'Failed to unload model: {str(e)}'}), 500
     else:
@@ -300,17 +247,24 @@ def unload_model():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    global server_process, LLAMA_SERVER_HOST, LLAMA_SERVER_PORT, LLAMA_SERVER_PATH
-    is_running = server_process and server_process.poll() is None
+    is_running = server_running('llama-server')
+    run = server_runs.get('llama-server')
     config = load_config()
     settings = config.get('settings', get_default_settings())
     return jsonify({
         'is_loaded': is_running,
+        'is_ready': bool(is_running and run['ready']),  # past "server is listening" (False while loading)
         'llama_server_path': settings.get('llama_server_path', LLAMA_SERVER_PATH),
         'llama_server_host': settings.get('llama_server_host', LLAMA_SERVER_HOST),
         # While running, report the port llama-server was actually launched with
-        'llama_server_port': server_port if is_running else settings.get('llama_server_port', LLAMA_SERVER_PORT)
+        'llama_server_port': run['port'] if is_running else settings.get('llama_server_port', LLAMA_SERVER_PORT)
     })
+
+@app.route('/api/log', methods=['GET'])
+def get_log():
+    """Recent llama-server output (current run, or the last one) for the dashboard console"""
+    run = server_runs.get('llama-server')
+    return jsonify(log_history(run) if run else {'lines': [], 'run': None, 'end': 0})
 
 @app.route('/api/settings', methods=['GET'])
 def get_settings():
@@ -356,9 +310,7 @@ def rpc_page():
 
 @app.route('/api/rpc/start_worker', methods=['POST'])
 def start_rpc_worker():
-    global rpc_worker_process
-
-    if rpc_worker_process and rpc_worker_process.poll() is None:
+    if server_running('rpc-worker'):
         return jsonify({'error': 'RPC worker is already running'}), 400
 
     data = request.json or {}
@@ -410,43 +362,27 @@ def start_rpc_worker():
     print(f"Manager: Starting RPC worker on {host}:{port} ({server_path})"
           + (f", cache_dir={cache_dir}" if cache_dir else ""))
 
+    # The binary runs under a bash wrapper (see launch_run), so a missing one wouldn't raise here
+    if not shutil.which(server_path):
+        return jsonify({'error': f'Failed to start RPC worker: rpc-server not found at {server_path}'}), 500
+
     try:
-        rpc_worker_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1,
-            env=worker_env
-        )
-
-        output_thread = threading.Thread(
-            target=read_rpc_worker_output,
-            args=(rpc_worker_process, socketio)
-        )
-        output_thread.daemon = True
-        output_thread.start()
-
+        # Keeps running if the manager restarts
+        launch_run('rpc-worker', 'rpc-worker', cmd, env=worker_env, description=f'RPC worker on {host}:{port}')
         return jsonify({'success': True, 'message': f'Starting RPC worker on {host}:{port} ...'})
     except Exception as e:
         return jsonify({'error': f'Failed to start RPC worker: {str(e)}'}), 500
 
 @app.route('/api/rpc/stop_worker', methods=['POST'])
 def stop_rpc_worker():
-    global rpc_worker_process
-
-    if rpc_worker_process and rpc_worker_process.poll() is None:
+    if server_running('rpc-worker'):
+        run = server_runs['rpc-worker']
+        run['stopped'] = True
+        save_runs()
         try:
-            rpc_worker_process.terminate()
-            rpc_worker_process.wait(timeout=5)
-            rpc_worker_process = None
-            socketio.emit('rpc_worker_stopped', {'message': 'RPC worker stopped'})
-            return jsonify({'success': True, 'message': 'RPC worker stopped'})
-        except subprocess.TimeoutExpired:
-            rpc_worker_process.kill()
-            rpc_worker_process = None
-            socketio.emit('rpc_worker_stopped', {'message': 'RPC worker force killed'})
-            return jsonify({'success': True, 'message': 'RPC worker force killed'})
+            message = 'RPC worker force killed' if stop_process_group(run, timeout=5) else 'RPC worker stopped'
+            socketio.emit('rpc_worker_stopped', {'message': message})
+            return jsonify({'success': True, 'message': message})
         except Exception as e:
             return jsonify({'error': f'Failed to stop RPC worker: {str(e)}'}), 500
     else:
@@ -454,12 +390,18 @@ def stop_rpc_worker():
 
 @app.route('/api/rpc/status', methods=['GET'])
 def rpc_status():
-    worker_running = rpc_worker_process and rpc_worker_process.poll() is None
-    server_running = server_process and server_process.poll() is None
     return jsonify({
-        'rpc_worker_running': bool(worker_running),
-        'server_running': bool(server_running)
+        'rpc_worker_running': server_running('rpc-worker'),
+        'server_running': server_running('llama-server')
     })
+
+@app.route('/api/rpc/log', methods=['GET'])
+def get_rpc_log():
+    """Recent RPC worker and llama-server output (current or last runs), oldest run first,
+    for the RPC page console"""
+    runs = sorted((r for r in (server_runs.get('rpc-worker'), server_runs.get('llama-server')) if r),
+                  key=lambda r: r.get('started_at', 0))
+    return jsonify({'logs': [{'kind': r['kind'], **log_history(r)} for r in runs]})
 
 @app.route('/api/rpc/endpoints', methods=['GET'])
 def get_rpc_endpoints():
@@ -574,62 +516,389 @@ def build_shell_command(script, conda=None):
     lines.append(script['commands'])
     return '\n'.join(lines)
 
+# ---------------------------------------------------------------------------
+# Process runs (llama-server, the RPC worker and custom scripts) outlive the manager: output goes
+# to a log file (not a pipe that dies with the manager), RUN_WRAPPER writes the exit code to a
+# file, and run records are saved in RUNS_DIR so a restarted manager adopts what's still running.
+# ---------------------------------------------------------------------------
+
+RUN_WRAPPER = 'exit_file=$1; shift; "$@"; code=$?; echo "$code" > "$exit_file"; exit "$code"'
+LINE_BREAK = re.compile(rb'\r\n|\r|\n')  # \r too, so progress bars show up as they update
+RUN_FILES = (('servers.json', server_runs), ('runs.json', script_runs))
+runs_lock = threading.Lock()
+
+def save_runs():
+    """Persist run records (everything but the Popen handle)"""
+    with runs_lock:
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        for filename, runs in RUN_FILES:
+            data = {key: {k: v for k, v in run.items() if k != 'proc'} for key, run in list(runs.items())}
+            path = os.path.join(RUNS_DIR, filename)
+            with open(path + '.tmp', 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(path + '.tmp', path)
+
+def proc_identity(pid):
+    """[start time, boot id] of a live process, so a recycled PID is never mistaken for ours"""
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            fields = f.read().rsplit(')', 1)[1].split()  # fields after "pid (comm)"
+        with open('/proc/sys/kernel/random/boot_id') as f:
+            boot_id = f.read().strip()
+    except (OSError, IndexError):
+        return None
+    if fields[0] in ('Z', 'X'):  # exited (zombie / dead)
+        return None
+    return [fields[19], boot_id]
+
+def run_alive(run):
+    if run.get('proc') is not None:  # started by this manager process: it's our child
+        return run['proc'].poll() is None
+    return run['identity'] is not None and proc_identity(run['pid']) == run['identity']
+
+def run_exit_code(run):
+    try:
+        with open(run['exit_file']) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        pass  # killed by a signal, so the wrapper never wrote it
+    proc = run.get('proc')
+    return proc.returncode if proc is not None else None
+
+def runs_for(run):
+    return script_runs if run['kind'] == 'script' else server_runs
+
+def server_running(kind):
+    """Whether the 'llama-server' or 'rpc-worker' run is alive"""
+    run = server_runs.get(kind)
+    return run is not None and run_alive(run)
+
 def script_running(name):
     run = script_runs.get(name)
-    return run is not None and run['proc'].poll() is None
+    return run is not None and run_alive(run)
 
 def script_state(run):
     """One of: starting (waiting for ready pattern), ready, running, stopped, failed"""
-    code = run['proc'].poll()
-    if code is None:
+    if run_alive(run):
         if run['ready']:
             return {'state': 'ready', 'exit_code': None}
         return {'state': 'starting' if run['ready_pattern'] else 'running', 'exit_code': None}
-    return {'state': 'stopped' if code == 0 or run['stopped'] else 'failed', 'exit_code': code}
+    code = run_exit_code(run)
+    return {'state': 'stopped' if code == 0 or run_stopped(run) else 'failed', 'exit_code': code}
 
-def script_log(name, run, line):
-    run['log'].append(line)
-    socketio.emit('script_output', {'name': name, 'data': line})
+def run_id(run):
+    return os.path.splitext(os.path.basename(run['log']))[0]
 
-def read_script_output(name, run):
-    """Stream a custom script's output to its log buffer and the Custom Scripts page"""
-    proc, pattern = run['proc'], run['ready_pattern']
+def last_line_end(data):
+    """Offset just past the last line break in data (0 if none)"""
+    return max(data.rfind(b'\n'), data.rfind(b'\r')) + 1
+
+def log_history(run, max_lines=1000, max_bytes=256 * 1024):
+    """The last complete lines of a run's log (reading only its end), plus the run id and the byte
+    offset just past those lines. Live lines carry the same offsets, so a page can skip repeats."""
     try:
-        for line in iter(proc.stdout.readline, ''):
-            line = line.rstrip()
-            script_log(name, run, line)
-            if pattern and not run['ready'] and pattern in line:
-                run['ready'] = True
-                socketio.emit('script_status', {'name': name, 'state': 'ready', 'message': f'{name} is ready'})
+        with open(run['log'], 'rb') as f:
+            size = f.seek(0, os.SEEK_END)
+            start = max(0, size - max_bytes)
+            f.seek(start)
+            data = f.read()
+    except OSError:
+        return {'lines': [], 'run': run_id(run), 'end': 0}
+    cut = last_line_end(data)  # a trailing partial line comes later as a live line
+    lines = LINE_BREAK.split(data[:cut])[:-1]
+    if start > 0:
+        lines = lines[1:]  # first line is probably cut off
+    return {'lines': [line.decode('utf-8', 'replace') for line in lines[-max_lines:]],
+            'run': run_id(run), 'end': start + cut}
+
+def is_ready_line(run, line):
+    """Whether a log line shows the process is up"""
+    if run['kind'] == 'llama-server':
+        return 'main: server is listening on' in line
+    if run['kind'] == 'rpc-worker':  # rpc-server prints one of these on a successful bind/listen
+        return 'Starting RPC server' in line or 'Accepting' in line or 'listening' in line.lower()
+    return bool(run['ready_pattern']) and run['ready_pattern'] in line
+
+def emit_line(run, line, pos=None):
+    """pos: byte offset in the log just past this line (None for messages not from the log)"""
+    data = {'data': line, 'run': run_id(run), 'pos': pos}
+    if run['kind'] == 'script':
+        socketio.emit('script_output', {'name': run['name'], **data})
+    else:
+        socketio.emit('console_output', data)
+
+def mark_ready(run):
+    run['ready'] = True
+    save_runs()
+    if run['kind'] == 'llama-server':
+        socketio.emit('loading_complete', {'success': True, 'message': 'Model loaded successfully!'})
+    elif run['kind'] == 'rpc-worker':
+        socketio.emit('rpc_worker_started', {'success': True, 'message': 'RPC worker is running'})
+    else:
+        socketio.emit('script_status', {'name': run['name'], 'state': 'ready', 'message': f"{run['name']} is ready"})
+
+def finish_run(run):
+    """Record that a run ended: reap it and tell the pages (once per run)"""
+    if run.get('proc') is not None:
+        run['proc'].wait()
+    if runs_for(run).get(run['name']) is not run:
+        return  # replaced by a newer run, or the profile was deleted, while this one wound down
+    code = run_exit_code(run)
+    name = run['name']
+    if run['kind'] == 'script':
+        if run_stopped(run):
+            message = f'{name} stopped'
+        elif code is None:
+            message = f'{name} exited (exit code unknown)'
+        else:
+            message = f'{name} exited with code {code}'
+        try:
+            with open(run['log'], 'a') as f:
+                f.write(message + '\n')
+        except OSError:
+            pass
+    run['finished'] = True
+    save_runs()
+
+    if run['kind'] == 'llama-server':
+        if not run['ready']:  # output ended before "server is listening": loading failed
+            socketio.emit('loading_complete', {'success': False, 'message': f'llama-server exited before it was ready (exit code {code})'})
+    elif run['kind'] == 'rpc-worker':
+        socketio.emit('rpc_worker_stopped', {'message': 'RPC worker process ended'})
+    else:
+        socketio.emit('script_status', {'name': name, **script_state(run), 'message': message})
+
+def handle_log_line(run, raw, pos):
+    line = raw.decode('utf-8', 'replace').rstrip()
+    emit_line(run, line, pos)
+    if not run['ready'] and is_ready_line(run, line):
+        mark_ready(run)
+
+def follow_log(run, offset=0):
+    """Stream new log lines to the pages and watch for readiness until the process ends"""
+    partial = b''
+    partial_start = offset  # file offset where `partial` begins
+    process_gone = False
+    try:
+        with open(run['log'], 'rb') as f:
+            f.seek(offset)
+            while True:
+                data = f.read(65536)
+                if data:
+                    buf, line_start = partial + data, 0
+                    for brk in LINE_BREAK.finditer(buf):
+                        handle_log_line(run, buf[line_start:brk.start()], partial_start + brk.end())
+                        line_start = brk.end()
+                    partial, partial_start = buf[line_start:], partial_start + line_start
+                elif process_gone:
+                    break
+                elif not run_alive(run):
+                    process_gone = True  # one more read for anything it wrote last
+                else:
+                    time.sleep(0.25)
+        if partial:
+            handle_log_line(run, partial, partial_start + len(partial))
     except Exception as e:
-        script_log(name, run, f'Error reading output: {str(e)}')
+        emit_line(run, f'Error reading output: {str(e)}')
+        while run_alive(run):
+            time.sleep(1)
+    finish_run(run)
 
-    proc.wait()
-    message = f'{name} stopped' if run['stopped'] else f'{name} exited with code {proc.returncode}'
-    run['log'].append(message)
-    socketio.emit('script_status', {'name': name, **script_state(run), 'message': message})
+def start_follower(run, offset=0):
+    thread = threading.Thread(target=follow_log, args=(run, offset))
+    thread.daemon = True
+    thread.start()
 
-def stop_process_group(proc, timeout=10):
-    """SIGTERM the script's whole process group (bash plus e.g. vLLM workers), SIGKILL after timeout"""
-    pgid = proc.pid  # start_new_session=True makes the bash process the group leader
+def stop_marker(run):
+    """File the reaper creates for runs it stops, so they show as stopped rather than failed"""
+    return os.path.splitext(run['log'])[0] + '.stopped'
+
+def run_stopped(run):
+    """Stopped on purpose: from the UI, or by the reaper when the manager stopped"""
+    return run['stopped'] or os.path.exists(stop_marker(run))
+
+def discard_run_files(run):
+    for path in (run.get('log'), run.get('exit_file'), run.get('log') and stop_marker(run)):
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+@functools.lru_cache(maxsize=None)
+def systemd_scope_available():
+    """Whether processes can run in their own systemd scope. Without one, a process started by the
+    systemd service lives in the service's cgroup, and restarting the service kills it."""
+    if not shutil.which('systemd-run'):
+        return False
+    try:
+        return subprocess.run(['systemd-run', '--user', '--scope', '--quiet', '--collect', 'true'],
+                              capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+def launch_run(kind, name, argv, env=None, cwd=None, first_line=None, description='', **fields):
+    """Start argv so it outlives the manager, record it under server_runs[kind] or
+    script_runs[name], and follow its log. Raises if it can't be started."""
+    run_id = uuid.uuid4().hex[:12]
+    log_path = os.path.join(RUNS_DIR, f'{run_id}.log')
+    exit_path = os.path.join(RUNS_DIR, f'{run_id}.exit')
+    cmd = ['bash', '-c', RUN_WRAPPER, 'llm-run', exit_path] + list(argv)
+    if systemd_scope_available():
+        # Own systemd scope, outside the manager service's cgroup, so restarting the service doesn't
+        # kill it. The unit name lets uninstall-service.sh find these.
+        cmd = ['systemd-run', '--user', '--scope', '--quiet', '--collect', f'--unit=llama-server-manager-{run_id}',
+               f'--description=Llama-server Manager: {description}'] + cmd
+
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    try:
+        with open(log_path, 'w') as log:
+            if first_line:
+                log.write(first_line + '\n')
+        with open(log_path, 'a') as log:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,  # a file, not a pipe, so the process survives a manager restart
+                stderr=subprocess.STDOUT,
+                start_new_session=True  # own process group, so stopping kills its children too
+            )
+    except Exception:
+        discard_run_files({'log': log_path})
+        raise
+
+    runs = script_runs if kind == 'script' else server_runs
+    previous = runs.get(name)
+    if previous:
+        discard_run_files(previous)
+    run = {'kind': kind, 'name': name, 'pid': proc.pid, 'identity': proc_identity(proc.pid),
+           'started_at': time.time(), 'log': log_path, 'exit_file': exit_path, 'ready_pattern': '', 'ready': False,
+           'stopped': False, 'finished': False, **fields, 'proc': proc}
+    runs[name] = run
+    save_runs()
+    start_follower(run)
+    return run
+
+def adopt_runs():
+    """On startup, pick up processes started before the manager restarted"""
+    for filename, runs in RUN_FILES:  # load everything first: finish_run below saves all files
+        try:
+            with open(os.path.join(RUNS_DIR, filename)) as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for key, run in saved.items():
+            run['kind'] = 'script' if runs is script_runs else key
+            run['name'] = key
+            runs[key] = run
+
+    for runs in (server_runs, script_runs):
+        for run in list(runs.values()):
+            if run.get('finished'):
+                continue
+            if not run_alive(run):
+                finish_run(run)  # ended while the manager was down
+                continue
+            try:
+                with open(run['log'], 'rb') as f:
+                    data = f.read()
+            except OSError:
+                data = b''
+            if not run['ready'] and any(is_ready_line(run, line.decode('utf-8', 'replace'))
+                                        for line in LINE_BREAK.split(data)):
+                run['ready'] = True  # became ready while the manager was down
+            start_follower(run, offset=last_line_end(data))
+            label = f"custom script '{run['name']}'" if run['kind'] == 'script' else run['kind']
+            print(f"Manager: Re-attached to {label} (pid {run['pid']})")
+    save_runs()
+
+def stop_process_group(run, timeout=10):
+    """SIGTERM the run's whole process group (e.g. bash plus vLLM workers), SIGKILL after timeout.
+    Returns True if it had to SIGKILL."""
+    pgid = run['pid']  # start_new_session=True makes the wrapper bash the group leader
+    proc = run.get('proc')
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return False
+    forced = False
     deadline = time.time() + timeout
     while time.time() < deadline:
-        proc.poll()  # reap bash so it doesn't linger as a zombie in the group
+        if proc is not None:
+            proc.poll()  # reap our child so it doesn't linger as a zombie in the group
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             break  # every process in the group is gone
         time.sleep(0.2)
     else:
+        forced = True
         try:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    proc.wait()
+    if proc is not None:
+        proc.wait()
+    return forced
+
+# ---------------------------------------------------------------------------
+# Stopping processes when the manager stops. The manager can't run cleanup code when it's killed,
+# so a small helper process (the "reaper") does it: it holds the read end of a pipe whose write end
+# only the outermost manager process has, and the pipe closes however that process ends.
+# ---------------------------------------------------------------------------
+
+reaper_pipe = None  # write end; stays open for the manager's lifetime
+
+def reaper_main():
+    """`app.py --reaper`: wait for the manager to end (stdin closes), then, if the setting is on,
+    stop every process it started"""
+    class ManagerGone(Exception):
+        pass
+
+    def on_sigterm(*_):
+        raise ManagerGone  # being stopped ourselves (e.g. by uninstall-service.sh) counts too
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, on_sigterm)
+    try:
+        sys.stdin.buffer.read()  # returns at EOF: the manager is gone
+    except ManagerGone:
+        pass
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # don't get cut off halfway through
+
+    if not load_config().get('settings', {}).get('stop_processes_with_manager', True):
+        return
+    runs = []
+    for filename, _ in RUN_FILES:
+        try:
+            with open(os.path.join(RUNS_DIR, filename)) as f:
+                runs.extend(json.load(f).values())
+        except (OSError, ValueError):
+            pass
+    live = [run for run in runs if not run.get('finished') and run_alive(run)]  # identity-checked
+    for run in live:
+        open(stop_marker(run), 'w').close()
+    threads = [threading.Thread(target=stop_process_group, args=(run,)) for run in live]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if live:
+        print(f"Manager stopped: stopped {', '.join(run['name'] for run in live)}", flush=True)
+
+def start_reaper():
+    global reaper_pipe
+    read_end, reaper_pipe = os.pipe()  # both non-inheritable: no child gets the write end
+    cmd = [sys.executable, os.path.abspath(__file__), '--reaper']
+    if systemd_scope_available():
+        # Own scope, so tearing down the service's cgroup (even with SIGKILL) doesn't take it along
+        cmd = ['systemd-run', '--user', '--scope', '--quiet', '--collect',
+               f'--unit=llama-server-manager-reaper-{uuid.uuid4().hex[:12]}',
+               '--description=Llama-server Manager: stop processes when the manager stops'] + cmd
+    subprocess.Popen(cmd, stdin=read_end, start_new_session=True)
+    os.close(read_end)
 
 @app.route('/scripts')
 def scripts_page():
@@ -691,7 +960,10 @@ def update_script(name):
     config['custom_scripts'][index] = script
     save_config(config)
     if renamed and name in script_runs:
-        script_runs[script['name']] = script_runs.pop(name)  # keep its last log under the new name
+        run = script_runs.pop(name)  # keep its last log under the new name
+        run['name'] = script['name']
+        script_runs[script['name']] = run
+        save_runs()
     return jsonify({'success': True, 'message': 'Script profile updated', 'name': script['name']})
 
 @app.route('/api/scripts/<path:name>', methods=['DELETE'])
@@ -701,7 +973,10 @@ def delete_script(name):
     config = load_config()
     config['custom_scripts'] = [s for s in config['custom_scripts'] if s['name'] != name]
     save_config(config)
-    script_runs.pop(name, None)
+    run = script_runs.pop(name, None)
+    if run:
+        discard_run_files(run)
+        save_runs()
     return jsonify({'success': True, 'message': 'Script profile deleted'})
 
 @app.route('/api/scripts/<path:name>/start', methods=['POST'])
@@ -735,30 +1010,14 @@ def start_script(name):
     if script_path:
         proc_env['SCRIPT'] = script_path
 
+    env_label = f'{env_type}: {env_name}' if env_type != 'none' else 'system'
     try:
-        proc = subprocess.Popen(
-            ['bash', '-c', build_shell_command(script, conda)],
-            cwd=workdir,
-            env=proc_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1,
-            start_new_session=True  # own process group, so stop can kill its children too
-        )
+        launch_run('script', name, ['bash', '-c', build_shell_command(script, conda)],
+                   env=proc_env, cwd=workdir, first_line=f'▶ Starting {name} in {workdir} (env: {env_label})',
+                   description=f'script {name}', ready_pattern=script.get('ready_pattern', ''))
     except Exception as e:
         return jsonify({'error': f'Failed to start script: {str(e)}'}), 500
-
-    run = {'proc': proc, 'ready': False, 'stopped': False,
-           'ready_pattern': script.get('ready_pattern', ''), 'log': deque(maxlen=1000)}
-    script_runs[name] = run
-    env_label = f'{env_type}: {env_name}' if env_type != 'none' else 'system'
-    script_log(name, run, f'▶ Starting {name} in {workdir} (env: {env_label})')
     print(f"Manager: Starting custom script '{name}' in {workdir} (env: {env_label})")
-
-    output_thread = threading.Thread(target=read_script_output, args=(name, run))
-    output_thread.daemon = True
-    output_thread.start()
     return jsonify({'success': True, 'message': f'Starting {name}...'})
 
 @app.route('/api/scripts/<path:name>/stop', methods=['POST'])
@@ -767,8 +1026,9 @@ def stop_script(name):
         return jsonify({'error': f'{name} is not running'}), 400
     run = script_runs[name]
     run['stopped'] = True
+    save_runs()
     try:
-        stop_process_group(run['proc'])
+        stop_process_group(run)
     except Exception as e:
         return jsonify({'error': f'Failed to stop script: {str(e)}'}), 500
     return jsonify({'success': True, 'message': f'{name} stopped'})
@@ -776,9 +1036,13 @@ def stop_script(name):
 @app.route('/api/scripts/<path:name>/log', methods=['GET'])
 def get_script_log(name):
     run = script_runs.get(name)
-    return jsonify({'lines': list(run['log']) if run else []})
+    return jsonify(log_history(run) if run else {'lines': [], 'run': None, 'end': 0})
 
 if __name__ == '__main__':
+    if '--reaper' in sys.argv[1:]:
+        reaper_main()
+        sys.exit(0)
+
     # Create default config if it doesn't exist
     if not os.path.exists(CONFIG_FILE):
         default_config = {
@@ -804,5 +1068,15 @@ if __name__ == '__main__':
     LLAMA_SERVER_HOST = settings.get('llama_server_host', LLAMA_SERVER_HOST)
     LLAMA_SERVER_PORT = settings.get('llama_server_port', LLAMA_SERVER_PORT)
     print(f"Settings loaded: path={LLAMA_SERVER_PATH}, host={LLAMA_SERVER_HOST}, port={LLAMA_SERVER_PORT}")
-    
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+
+    debug = True
+    # Re-adopt llama-server / RPC worker / scripts still running from before a restart. With the debug
+    # reloader this block also runs in the file-watcher process; only the serving one adopts.
+    if not debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        adopt_runs()
+    # The reaper belongs to the outermost process (the reloader's file watcher, or the only process
+    # without it): reloads after app.py changes don't end that process, so they don't stop anything.
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        start_reaper()
+
+    socketio.run(app, host='0.0.0.0', port=5000, debug=debug, allow_unsafe_werkzeug=True)

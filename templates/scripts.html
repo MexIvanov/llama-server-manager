@@ -217,14 +217,17 @@
         let statuses = {};          // name -> {state, exit_code}
         let selected = localStorage.getItem('selectedScript');
         let editingName = null;     // null while adding a new profile
-        let logLoading = false;
+        // Live lines carry their run and log offset, so the ones the loaded history covers are skipped
+        let shown = { run: null, end: 0 };  // log range the console already shows
+        let pendingLines = null;            // live lines that arrive while history is loading
+        let historyRequest = 0;
 
         const STATE_UI = {
             stopped:  { dot: 'bg-gray-400',                text: 'text-gray-600',  label: () => 'Stopped' },
             starting: { dot: 'bg-amber-500 animate-pulse', text: 'text-amber-600', label: s => `Starting, waiting for "${s.ready_pattern}"` },
             ready:    { dot: 'bg-green-500 animate-pulse', text: 'text-green-600', label: () => 'Ready' },
             running:  { dot: 'bg-green-500 animate-pulse', text: 'text-green-600', label: () => 'Running' },
-            failed:   { dot: 'bg-red-500',                 text: 'text-red-600',   label: (s, st) => `Exited with code ${st.exit_code}` },
+            failed:   { dot: 'bg-red-500',                 text: 'text-red-600',   label: (s, st) => st.exit_code == null ? 'Exited, exit code unknown' : `Exited with code ${st.exit_code}` },
         };
 
         const ENV_HELP = {
@@ -234,8 +237,17 @@
         };
 
         // Socket.io event handlers
+        let connectedBefore = false;
+        socket.on('connect', function() {
+            // Reconnected after a manager restart: catch up on output printed while it was down
+            if (connectedBefore) loadScripts();
+            connectedBefore = true;
+        });
+
         socket.on('script_output', function(data) {
-            if (data.name === selected && !logLoading) addLogLine(data.data);
+            if (data.name !== selected) return;
+            if (pendingLines) pendingLines.push(data);  // history is loading: sort it out once it's here
+            else if (!inHistory(data)) addLogLine(data.data);
         });
 
         socket.on('script_status', function(data) {
@@ -393,19 +405,30 @@
             if (!stopBtn.dataset.busy) stopBtn.disabled = !active;
         }
 
+        function inHistory(line) {
+            return line.run != null && line.run === shown.run && line.pos != null && line.pos <= shown.end;
+        }
+
         async function loadLog() {
             clearConsole();
-            if (!selected) return;
+            const request = ++historyRequest;
+            if (!selected) {
+                pendingLines = null;
+                return;
+            }
             const name = selected;
-            logLoading = true;
+            const queued = pendingLines = [];
             try {
                 const response = await fetch(apiPath(name, 'log'));
                 const data = await response.json();
-                if (name === selected) data.lines.forEach(addLogLine);
+                if (request !== historyRequest) return;  // another script was selected meanwhile
+                shown = { run: data.run, end: data.end };
+                data.lines.forEach(addLogLine);
+                queued.forEach(line => { if (line.name === selected && !inHistory(line)) addLogLine(line.data); });
             } catch (error) {
                 addConsoleOutput(`❌ Network error: ${error.message}`, 'error');
             } finally {
-                logLoading = false;
+                if (pendingLines === queued) pendingLines = null;
             }
         }
 

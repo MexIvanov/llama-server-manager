@@ -180,7 +180,8 @@
 
         // Socket.io event handlers
         socket.on('console_output', function(data) {
-            addConsoleOutput(data.data);
+            if (pendingLines) pendingLines.push(data);  // history is loading: sort it out once it's here
+            else if (!inHistory(data)) addConsoleOutput(data.data);
         });
 
         socket.on('loading_complete', function(data) {
@@ -208,9 +209,27 @@
             refreshStatus();
         });
 
+        // Reconnected after a manager restart (the worker and llama-server keep running): catch up on
+        // output printed meanwhile, refresh the status, and stop the spinner unless the model is still loading
+        let connectedBefore = false;
+        socket.on('connect', async function() {
+            if (connectedBefore) {
+                loadConsoleHistory();
+                refreshStatus();
+                try {
+                    const status = await (await fetch('/api/status')).json();
+                    if (!status.is_loaded || status.is_ready) {
+                        document.getElementById('loadingIndicator').classList.add('hidden');
+                    }
+                } catch (error) {}
+            }
+            connectedBefore = true;
+        });
+
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             loadModels();
+            loadConsoleHistory();
             refreshStatus();
             setInterval(refreshStatus, 5000);
         });
@@ -428,6 +447,55 @@
         function clearConsole() {
             const consoleDiv = document.getElementById('consoleOutput');
             consoleDiv.innerHTML = '<div class="text-gray-400">Console output will appear here...</div>';
+        }
+
+        // Replace the console with recent RPC worker and llama-server output (current or last runs).
+        // Their logs are separate, so each shows as its own block, oldest run first. Lines have no
+        // timestamp: they were printed before the page got them. Live lines carry their run and log
+        // offset, so the ones a block already covers are skipped.
+        const LOG_LABELS = { 'rpc-worker': 'RPC worker', 'llama-server': 'llama-server' };
+        let shownEnds = {};         // run id -> log offset the console already shows up to
+        let pendingLines = null;    // live lines that arrive while history is loading
+        let historyRequest = 0;
+
+        function inHistory(line) {
+            return line.run != null && line.run in shownEnds && line.pos != null && line.pos <= shownEnds[line.run];
+        }
+
+        async function loadConsoleHistory() {
+            const request = ++historyRequest;
+            const queued = pendingLines = [];
+            try {
+                const data = await (await fetch('/api/rpc/log')).json();
+                if (request !== historyRequest) return;  // a newer load took over
+                shownEnds = {};
+                data.logs.forEach(log => { shownEnds[log.run] = log.end; });
+                clearConsole();
+                const logs = data.logs.filter(log => log.lines.length);
+                if (logs.length) {
+                    const consoleDiv = document.getElementById('consoleOutput');
+                    const fragment = document.createDocumentFragment();
+                    const addLine = (text, className) => {
+                        const lineDiv = document.createElement('div');
+                        lineDiv.className = className;
+                        lineDiv.textContent = text;  // as text, so output like <|im_start|> isn't parsed as HTML
+                        fragment.appendChild(lineDiv);
+                    };
+                    logs.forEach(log => {
+                        // Say whose output it is only when both have some
+                        if (logs.length > 1) addLine(`Earlier output from ${LOG_LABELS[log.kind]}:`, 'text-blue-400 mt-2 first:mt-0');
+                        log.lines.forEach(line => addLine(line, 'text-gray-300'));
+                    });
+                    consoleDiv.replaceChildren(fragment);
+                    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                }
+                queued.forEach(line => { if (!inHistory(line)) addConsoleOutput(line.data); });
+            } catch (error) {
+                console.error('Error loading console history:', error);
+                if (request === historyRequest) queued.forEach(line => addConsoleOutput(line.data));
+            } finally {
+                if (pendingLines === queued) pendingLines = null;
+            }
         }
     </script>
 </body>

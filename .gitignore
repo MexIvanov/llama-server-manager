@@ -220,3 +220,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Llama-server Manager: llama-server, RPC worker and custom script logs + run state
+script_runs/
