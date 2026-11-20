@@ -49,7 +49,7 @@ logout, restarts on failure, and starts at boot via lingering):
 ```bash
 ./install-service.sh --venv          # create a project-local .venv and install deps
 ./install-service.sh --conda <env>   # use an existing conda environment
-./install-service.sh --system        # use the system python3
+./install-service.sh --system        # use the system Python (python3 or python)
 ./install-service.sh                 # no flag: choose interactively
 ```
 

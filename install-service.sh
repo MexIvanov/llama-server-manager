@@ -13,7 +13,7 @@
 #   --venv            Create/use a project-local .venv and install requirements
 #   --conda <name>    Use an existing conda env named <name>
 #   --conda=<name>    (same, = form)
-#   --system          Use the system python3
+#   --system          Use the system Python (python3, else python)
 #   --no-linger       Do not enable lingering (service won't start until you log in)
 #   -h, --help        Show this help and exit
 #
@@ -34,12 +34,30 @@ usage() {
 
 die() { echo "Error: $*" >&2; exit 1; }
 
+# Print the real path of the first Python >= 3.8 on PATH (python3, then python).
+# sys.executable resolves shims/wrappers (e.g. pyenv) to the actual interpreter.
+find_python() {
+    local cand
+    for cand in python3 python; do
+        if command -v "$cand" >/dev/null 2>&1 &&
+           "$cand" -c 'import sys; sys.exit(sys.version_info < (3, 8))' 2>/dev/null; then
+            "$cand" -c 'import sys; print(sys.executable)'
+            return 0
+        fi
+    done
+    return 1
+}
+
+[[ $EUID -eq 0 ]] && die "Run as your normal user (not root/sudo); this installs a per-user service."
+RUN_USER="${USER:-$(id -un)}"
+
 # ---- parse args ----------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --venv)       ENV_MODE="venv" ;;
         --system)     ENV_MODE="system" ;;
-        --conda)      ENV_MODE="conda"; CONDA_ENV="${2:-}"; shift ;;
+        --conda)      ENV_MODE="conda"
+                      if [[ -n "${2:-}" && "${2:-}" != -* ]]; then CONDA_ENV="$2"; shift; fi ;;
         --conda=*)    ENV_MODE="conda"; CONDA_ENV="${1#*=}" ;;
         --no-linger)  NO_LINGER=1 ;;
         -h|--help)    usage; exit 0 ;;
@@ -53,8 +71,8 @@ if [[ -z "$ENV_MODE" ]]; then
     echo "Select the Python environment to run the service with:"
     echo "  1) Local venv  (create $PROJECT_DIR/.venv and install requirements)"
     echo "  2) Conda env   (use an existing conda environment)"
-    echo "  3) System python3"
-    read -rp "Choice [1-3]: " choice
+    echo "  3) System Python"
+    read -rp "Choice [1-3]: " choice || die "No input; pass --venv, --conda <name> or --system."
     case "$choice" in
         1) ENV_MODE="venv" ;;
         2) ENV_MODE="conda" ;;
@@ -65,7 +83,8 @@ fi
 
 if [[ "$ENV_MODE" == "conda" && -z "$CONDA_ENV" ]]; then
     default_env="${CONDA_DEFAULT_ENV:-base}"
-    read -rp "Conda environment name [$default_env]: " CONDA_ENV
+    read -rp "Conda environment name [$default_env]: " CONDA_ENV \
+        || die "No input; pass --venv, --conda <name> or --system."
     CONDA_ENV="${CONDA_ENV:-$default_env}"
 fi
 
@@ -74,8 +93,12 @@ PYTHON=""
 case "$ENV_MODE" in
     venv)
         if [[ ! -x "$PROJECT_DIR/.venv/bin/python" ]]; then
-            echo "Creating venv at $PROJECT_DIR/.venv ..."
-            python3 -m venv "$PROJECT_DIR/.venv"
+            BASE_PY="$(find_python)" || die "No Python 3.8+ found on PATH (tried python3, python)."
+            echo "Creating venv at $PROJECT_DIR/.venv (from $BASE_PY) ..."
+            if ! "$BASE_PY" -m venv "$PROJECT_DIR/.venv"; then
+                rm -rf "$PROJECT_DIR/.venv"
+                die "Could not create the venv. On Debian/Ubuntu install the venv package, e.g. 'sudo apt install python3-venv'."
+            fi
         fi
         PYTHON="$PROJECT_DIR/.venv/bin/python"
         echo "Installing dependencies into the venv ..."
@@ -83,26 +106,30 @@ case "$ENV_MODE" in
         "$PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt"
         ;;
     conda)
-        command -v conda >/dev/null 2>&1 || die "conda not found on PATH."
-        CONDA_BASE="$(conda info --base)"
-        if [[ "$CONDA_ENV" == "base" ]]; then
-            PYTHON="$CONDA_BASE/bin/python"
-        else
-            PYTHON="$CONDA_BASE/envs/$CONDA_ENV/bin/python"
-        fi
-        [[ -x "$PYTHON" ]] || die "conda env '$CONDA_ENV' not found ($PYTHON)."
+        CONDA="${CONDA_EXE:-$(command -v conda || true)}"
+        [[ -n "$CONDA" ]] || die "conda not found (not on PATH and \$CONDA_EXE is unset)."
+        # Let conda resolve the env: it may live outside <base>/envs (e.g. ~/.conda/envs).
+        ENV_PREFIX="$("$CONDA" run -n "$CONDA_ENV" printenv CONDA_PREFIX 2>/dev/null || true)"
+        [[ -n "$ENV_PREFIX" ]] || die "conda env '$CONDA_ENV' not found."
+        PYTHON="$ENV_PREFIX/bin/python"
+        [[ -x "$PYTHON" ]] || PYTHON="$ENV_PREFIX/bin/python3"
+        [[ -x "$PYTHON" ]] || die "conda env '$CONDA_ENV' has no Python; run: conda install -n $CONDA_ENV python"
         echo "Installing dependencies into conda env '$CONDA_ENV' ..."
         "$PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt"
         ;;
     system)
-        PYTHON="$(command -v python3)" || die "python3 not found on PATH."
+        PYTHON="$(find_python)" || die "No Python 3.8+ found on PATH (tried python3, python)."
         if ! "$PYTHON" -c "import flask, flask_socketio" >/dev/null 2>&1; then
             echo "Installing dependencies for the system python (user site) ..."
-            "$PYTHON" -m pip install --user -r "$PROJECT_DIR/requirements.txt"
+            "$PYTHON" -m pip install --user -r "$PROJECT_DIR/requirements.txt" \
+                || die "pip install failed for $PYTHON (pip missing, or the system Python is" \
+                       "externally managed / PEP 668). Re-run with --venv, or install the OS" \
+                       "packages, e.g. python3-flask python3-flask-socketio."
         fi
         ;;
 esac
 
+"$PYTHON" -c "import flask, flask_socketio" || die "Dependencies are not importable by $PYTHON."
 echo "Using interpreter: $PYTHON"
 
 # ---- write the unit file -------------------------------------------------------
@@ -116,7 +143,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$PROJECT_DIR
-ExecStart=$PYTHON $PROJECT_DIR/app.py
+ExecStart="$PYTHON" "$PROJECT_DIR/app.py"
+Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=3
 
@@ -127,15 +155,16 @@ echo "Wrote unit file: $UNIT_FILE"
 
 # ---- activate ------------------------------------------------------------------
 systemctl --user daemon-reload
-systemctl --user enable --now "$SERVICE_NAME.service"
+systemctl --user enable "$SERVICE_NAME.service"
+systemctl --user restart "$SERVICE_NAME.service"   # restart so a re-install picks up the new unit
 
 LINGER_OK=0
 if [[ "$NO_LINGER" -eq 0 ]] && command -v loginctl >/dev/null 2>&1; then
     # Enabling linger normally needs admin authorization (polkit). Try unprivileged
     # first, then a non-interactive sudo (-n never hangs on a password prompt).
-    if loginctl enable-linger "$USER" 2>/dev/null; then
+    if loginctl enable-linger "$RUN_USER" 2>/dev/null; then
         LINGER_OK=1
-    elif command -v sudo >/dev/null 2>&1 && sudo -n loginctl enable-linger "$USER" 2>/dev/null; then
+    elif command -v sudo >/dev/null 2>&1 && sudo -n loginctl enable-linger "$RUN_USER" 2>/dev/null; then
         LINGER_OK=1
     fi
 fi
@@ -151,5 +180,5 @@ if [[ "$NO_LINGER" -eq 0 && "$LINGER_OK" -eq 0 ]]; then
     echo ""
     echo "   Note: lingering not enabled (needs admin auth). The service will stop"
     echo "         when you log out. To make it persist across logout/reboot, run:"
-    echo "           sudo loginctl enable-linger \"$USER\""
+    echo "           sudo loginctl enable-linger \"$RUN_USER\""
 fi
